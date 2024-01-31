@@ -26,7 +26,8 @@ target_link_libraries(cuda_utils PUBLIC CUDA::cudart)
 add_library(logger STATIC logger.cc)
 set_property(TARGET logger PROPERTY POSITION_INDEPENDENT_CODE  ON)
 set_property(TARGET logger PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS  ON)
-target_link_libraries(logger PUBLIC CUDA::cudart)
+
+target_link_libraries(logger PUBLIC CUDA::cudart -lpthread)
 
 add_library(cublasAlgoMap STATIC cublasAlgoMap.cc)
 set_property(TARGET cublasAlgoMap PROPERTY POSITION_INDEPENDENT_CODE  ON)

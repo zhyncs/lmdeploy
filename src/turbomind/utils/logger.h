@@ -18,6 +18,7 @@
 
 #include <cstdlib>
 #include <map>
+#include <spdlog/spdlog.h>
 #include <string>
 
 #include "src/turbomind/utils/string_utils.h"
@@ -29,6 +30,35 @@ namespace turbomind {
 #ifdef ERROR
 #undef ERROR
 #endif
+
+class SpdLogger {
+public:
+    static SpdLogger& get_instance()
+    {
+        static SpdLogger spdlogger;
+        return spdlogger;
+    }
+    spdlog::logger* get_logger()
+    {
+        return logger_.get();
+    }
+
+    void set_log_path(const std::string& path)
+    {
+        path_ = path;
+    }
+    void init();
+
+private:
+    SpdLogger()                 = default;
+    ~SpdLogger()                = default;
+    SpdLogger(const SpdLogger&) = delete;
+    SpdLogger& operator=(const SpdLogger&) = delete;
+
+    std::string                     path_;
+    bool                            inited_ = false;
+    std::shared_ptr<spdlog::logger> logger_;
+};
 
 class Logger {
 
@@ -54,10 +84,9 @@ public:
     void log(const Level level, const std::string format, const Args&... args)
     {
         if (level_ <= level) {
-            std::string fmt = getPrefix(level) + format + "\n";
-            // FILE*       out    = level_ < WARNING ? stdout : stderr;
+            std::string fmt    = getPrefix(level) + format + "\n";
             std::string logstr = fmtstr(fmt, args...);
-            fprintf(stderr, "%s", logstr.c_str());
+            SpdLogger::get_instance().get_logger()->log(spdlog::level::trace, logstr);
         }
     }
 
@@ -65,10 +94,9 @@ public:
     void log(const Level level, const int rank, const std::string format, const Args&... args)
     {
         if (level_ <= level) {
-            std::string fmt = getPrefix(level, rank) + format + "\n";
-            // FILE*       out    = level_ < WARNING ? stdout : stderr;
+            std::string fmt    = getPrefix(level, rank) + format + "\n";
             std::string logstr = fmtstr(fmt, args...);
-            fprintf(stderr, "%s", logstr.c_str());
+            SpdLogger::get_instance().get_logger()->log(spdlog::level::trace, logstr);
         }
     }
 
