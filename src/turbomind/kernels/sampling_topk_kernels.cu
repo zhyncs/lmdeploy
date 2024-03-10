@@ -670,65 +670,141 @@ template void invokeTopKTopPSampling(void*          workspace,
                                      cudaStream_t   stream);
 #endif
 
-template<int BLOCK_SIZE_>
-__global__ void medusaBatchedMatchKernel(const int* __restrict__ input_ids,
-                                         const int* __restrict__ output_ids,
-                                         int*      match_length,
-                                         const int path_num,
-                                         int       size)
+template<typename T, int BLOCK_SIZE_>
+__global__ void topk(const T* __restrict log_probs,
+                     T*        tmp_log_probs,
+                     int*      topk_tmp_id_buf,
+                     T*        topk_tmp_val_buf,
+                     const int max_top_k,
+                     const int vocab_size)
 {
-    //[b, path_num, 1 + head_num]
-    const int length  = size + 1;
-    const int limit_r = gridDim.x * path_num * length;
-    const int bid     = blockIdx.x;   // (0, batch_size)
-    const int tid     = threadIdx.x;  // (0, BLOCK_SIZE_)
+    typedef cub::BlockReduce<TopK_2<T>, BLOCK_SIZE_> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage     temp_storage;
 
-    typedef cub::BlockReduce<TopK_2<int>, BLOCK_SIZE_> BlockReduce;
-    __shared__ typename BlockReduce::TempStorage       temp_storage;
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
 
-    TopK_2<int> partial;
-    partial.init();
+    const int batch_id           = bid;
+    const int k                  = max_top_k;
+    const int tmp_log_buf_index  = batch_id * vocab_size;
+    const int tmp_topk_buf_index = batch_id * max_top_k;
 
-    for (int idx = tid; idx < path_num; idx += BLOCK_SIZE_) {
-        int start_id          = bid * path_num * length + idx * length;  // belong to (bid, path_id)
-        int accumulate_length = 0;
-        for (int i = 0; i < size && (start_id + i) < limit_r; ++i) {
-            if (input_ids[start_id + i + 1] == output_ids[start_id + i]) {
-                ++accumulate_length;
-            }
-            else {
-                break;
-            }
+    TopK_2<T>  partial;
+    const bool IS_FP16   = std::is_same<T, half>::value;
+    const T    MAX_T_VAL = (IS_FP16) ? HALF_FLT_MAX : FLT_MAX;
+
+    for (int elem_id = tid; elem_id < vocab_size; elem_id += BLOCK_SIZE_) {
+        int index            = elem_id + tmp_log_buf_index;
+        tmp_log_probs[index] = log_probs[index];
+    }
+
+    for (int ite = 0; ite < k; ite++) {
+        partial.init();
+#pragma unroll
+        for (int elem_id = tid; elem_id < vocab_size; elem_id += BLOCK_SIZE_) {
+            int index = elem_id + tmp_log_buf_index;
+            partial.insert(tmp_log_probs[index], index);
         }
-        partial.insert(accumulate_length, idx);
-    }
+        TopK_2<T> total = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2<T>);
 
-    TopK_2<int> total = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2<int>);
-
-    if (tid == 0) {
-        const int index     = bid;
-        match_length[index] = total.u;
+        if (tid == 0) {
+            const int index         = tmp_topk_buf_index + ite;
+            topk_tmp_id_buf[index]  = total.p % vocab_size;
+            topk_tmp_val_buf[index] = total.u;
+            tmp_log_probs[total.p]  = -MAX_T_VAL;
+        }
+        __syncthreads();
     }
-    __syncthreads();
 }
 
-void invokeMedusaBatchMatch(const int*   input_ids,
-                            const int*   output_ids,
-                            int*         max_match_length,
-                            int          batch_size,
-                            int          path_num,
-                            int          medusa_head_num,
-                            cudaStream_t stream)
+#ifdef _MSC_VER
+#define ONLY_TOPK_CASE_K(K_MIN, K_MAX, BLOCK_SIZE_)                                                                    \
+    if (K_MIN <= max_top_k && max_top_k <= K_MAX) {                                                                    \
+        topk<T, BLOCK_SIZE_><<<batch_size, BLOCK_SIZE_, 0, stream>>>(                                                  \
+            log_probs, temp_log_probs, topk_tmp_id_buf, topk_tmp_val_buf, max_top_k, vocab_size);                      \
+        break;                                                                                                         \
+    }
+#else
+#define ONLY_TOPK_CASE_K(K_MIN, K_MAX, BLOCK_SIZE_)                                                                    \
+    case K_MIN ... K_MAX:                                                                                              \
+        topk<T, BLOCK_SIZE_><<<batch_size, BLOCK_SIZE_, 0, stream>>>(                                                  \
+            log_probs, temp_log_probs, topk_tmp_id_buf, topk_tmp_val_buf, max_top_k, vocab_size);                      \
+        break;
+#endif
+
+template<typename T>
+void invokeBatchTopK(void*        workspace,
+                     size_t&      workspace_size,
+                     const T*     log_probs,
+                     const int    max_top_k,
+                     const int    vocab_size_padded,
+                     cudaStream_t stream,
+                     const int    batch_size)
 {
-    // inputs:
-    // input_ids: [batch_size, path_num, 1 + medusa_head_num]
-    // output_ids: [batch_size, path_num, 1 + medusa_head_num]
-    // outputs:
-    // max_match_length: [batch_size]
-    dim3 grid, block;
-    grid.x  = batch_size;
-    block.x = 64;
-    medusaBatchedMatchKernel<64>
-        <<<grid, block, 0, stream>>>(input_ids, output_ids, max_match_length, path_num, medusa_head_num);
+
+    const int vocab_size              = vocab_size_padded;
+    int       temp_log_probs_buf_size = batch_size * vocab_size;
+    int       topk_tmp_ids_buf_size   = batch_size * max_top_k;
+    int       topk_tmp_val_buf_size   = batch_size * max_top_k;
+
+    temp_log_probs_buf_size = (int)(ceil(temp_log_probs_buf_size / 4.)) * 4;
+    topk_tmp_ids_buf_size   = (int)(ceil(topk_tmp_ids_buf_size / 4.)) * 4;
+    topk_tmp_val_buf_size   = (int)(ceil(topk_tmp_val_buf_size / 4.)) * 4;
+
+    if (workspace == nullptr) {
+        workspace_size = sizeof(T) * temp_log_probs_buf_size + sizeof(int) * topk_tmp_ids_buf_size
+                         + sizeof(T) * topk_tmp_val_buf_size;
+        return;
+    }
+
+    T*   temp_log_probs   = (T*)workspace;
+    int* topk_tmp_id_buf  = (int*)(temp_log_probs + temp_log_probs_buf_size);
+    T*   topk_tmp_val_buf = (T*)(topk_tmp_id_buf + topk_tmp_ids_buf_size);
+#ifdef _MSC_VER
+    do {
+        ONLY_TOPK_CASE_K(1, 16, 128 * 8);
+        ONLY_TOPK_CASE_K(17, 32, 256 * 8);
+        ONLY_TOPK_CASE_K(33, 64, 256 * 8);
+        ONLY_TOPK_CASE_K(65, 1024, 256 * 8);
+        throw std::domain_error(fmtstr("only top-k kernel supports 1<=k<=1024 but got k=%d", max_top_k));
+    } while (0);
+#else
+    switch (max_top_k) {
+        ONLY_TOPK_CASE_K(1, 16, 128 * 8);
+        ONLY_TOPK_CASE_K(17, 32, 256 * 8);
+        ONLY_TOPK_CASE_K(33, 64, 256 * 8);
+        ONLY_TOPK_CASE_K(65, 1024, 256 * 8);
+        default:
+            throw std::domain_error(fmtstr("only top-k kernel supports 1<=k<=1024 but got k=%d", max_top_k));
+    }
+#endif
 }
+
+#undef ONLY_TOPK_CASE_K
+
+template void invokeBatchTopK(void*        workspace,
+                              size_t&      workspace_size,
+                              const half*  log_probs,
+                              const int    max_top_k,
+                              const int    vocab_size_padded,
+                              cudaStream_t stream,
+                              const int    batch_size);
+
+template void invokeBatchTopK(void*        workspace,
+                              size_t&      workspace_size,
+                              const float* log_probs,
+                              const int    max_top_k,
+                              const int    vocab_size_padded,
+                              cudaStream_t stream,
+                              const int    batch_size);
+
+#ifdef ENABLE_BF16
+template void invokeBatchTopK(void*                workspace,
+                              size_t&              workspace_size,
+                              const __nv_bfloat16* log_probs,
+                              const int            max_top_k,
+                              const int            vocab_size_padded,
+                              cudaStream_t         stream,
+                              const int            batch_size);
+#endif
 }  // namespace turbomind

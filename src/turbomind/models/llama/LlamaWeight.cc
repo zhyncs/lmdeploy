@@ -19,6 +19,7 @@
 // https://github.com/NVIDIA/FasterTransformer/blob/main/src/turbomind/models/multi_gpu_gpt/ParallelGptWeight.cc
 
 #include "src/turbomind/models/llama/LlamaWeight.h"
+#include "src/turbomind/models/medusa_plugin/medusa_weight.h"
 
 namespace turbomind {
 
@@ -34,7 +35,9 @@ LlamaWeight<T>::LlamaWeight(size_t     head_num,
                             int        group_size,
                             LoraParams lora_params,
                             size_t     tensor_para_size,
-                            size_t     tensor_para_rank):
+                            size_t     tensor_para_rank,
+                            int        medusa_num_heads,
+                            int        medusa_num_layers):
     hidden_units_(head_num * size_per_head),
     inter_size_(inter_size),
     vocab_size_(vocab_size),
@@ -42,7 +45,8 @@ LlamaWeight<T>::LlamaWeight(size_t     head_num,
     num_layer_(num_layer),
     weight_type_(weight_type),
     tensor_para_size_(tensor_para_size),
-    tensor_para_rank_(tensor_para_rank)
+    tensor_para_rank_(tensor_para_rank),
+    medusa_enable_(medusa_num_heads != 0)
 {
     if (vocab_size_padded_ % tensor_para_size_ != 0) {
         vocab_size_padded_ = (vocab_size_padded_ + tensor_para_size_ - 1) / tensor_para_size_ * tensor_para_size_;
@@ -64,6 +68,15 @@ LlamaWeight<T>::LlamaWeight(size_t     head_num,
     }
 
     mallocWeights();
+    if (medusa_enable_) {
+        medusa_weight = std::make_unique<MedusaWeight<T>>(medusa_num_heads,
+                                                          medusa_num_layers,
+                                                          hidden_units_,
+                                                          vocab_size_,
+                                                          weight_type,
+                                                          tensor_para_size,
+                                                          tensor_para_rank);
+    }
 }
 
 template<typename T>
@@ -113,6 +126,10 @@ void LlamaWeight<T>::loadModel(std::string dir_path)
     for (unsigned layer = 0; layer < num_layer_; ++layer) {
         decoder_layer_weights[layer]->loadModel(dir_path + "layers." + std::to_string(layer), model_file_type);
     }
+
+    if (medusa_enable_) {
+        medusa_weight->load_model(dir_path, model_file_type);
+    }
 }
 
 template<typename T>
@@ -145,6 +162,12 @@ TensorMap LlamaWeight<T>::getParams()
     }
 
     return output;
+}
+
+template<typename T>
+const MedusaWeight<T>& LlamaWeight<T>::get_medusa_weight() const
+{
+    return *medusa_weight.get();
 }
 
 #ifdef ENABLE_FP32

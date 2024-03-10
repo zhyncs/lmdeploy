@@ -17,8 +17,8 @@ template<typename T>
 class MedusaHead {
 public:
     MedusaHead(size_t           in_size,
-               size_t           out_size,
-               size_t           medusa_num_heads,
+               size_t           vocab_size,
+               int              medusa_num_heads,
                cudaStream_t     stream,
                cublasMMWrapper* cublas_wrapper,
                IAllocator*      allocator,
@@ -43,7 +43,7 @@ private:
 private:
     size_t in_size_;
     size_t vocab_size_;
-    size_t medusa_num_heads_;
+    int    medusa_num_heads_;
 
     std::unique_ptr<ResBlock<T>>    resblock_;
     std::unique_ptr<LlamaLinear<T>> linear_;
@@ -51,6 +51,7 @@ private:
     T*    resblock_buf_;
     void* workspace_buf_;
     T*    medusa_head_logits_buf_;
+    int*  topk_output_ids_t_;
 
     cudaStream_t     stream_;
     cublasMMWrapper* cublas_wrapper_;
