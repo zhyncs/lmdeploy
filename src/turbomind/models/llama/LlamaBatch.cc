@@ -245,6 +245,9 @@ void LlamaBatch<T>::ProcessInferRequests(const Requests& requests)
         FT_CHECK(state.sequences[idx]);
 
         auto& seq = *state.sequences[idx];
+        if (medusa_enable_) {
+            seq.iter = 0;
+        }
 
         if (int step = r->inputs[rank_].getVal<int>("step", -1); step >= 0) {
             if (step <= seq.tokens.size()) {
@@ -947,7 +950,8 @@ LlamaBatch<T>::LlamaBatch(
     num_tokens_per_iter_(params.num_tokens_per_iter),
     extra_tokens_per_iter_(params.extra_tokens_per_iter),
     max_prefill_iters_(params.max_prefill_iters),
-    medusa_num_heads_(medusa_num_heads)
+    medusa_num_heads_(medusa_num_heads),
+    medusa_enable_(medusa_num_heads != 0)
 {
     stream_         = model_->stream_;
     allocator_      = model_->allocator_;
@@ -1621,6 +1625,9 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
         if (state_->requests[i]) {
             FT_CHECK(state_->sequences[i]);
             state_->sequences[i]->cache_len += state_->sequences[i]->input_length;
+            if (medusa_enable_) {
+                state_->sequences[i]->iter += 1;
+            }
         }
     }
 

@@ -158,8 +158,6 @@ private:
                        size_t          token_ids_len,
                        size_t          batch_size);
 
-    bool get_medusa_enable();
-
 private:
     friend class LlamaBatch<T>;
 

@@ -407,12 +407,6 @@ void LlamaV2<T>::dynamicDecode(int*            token_ids,
     dynamic_decode_layer_->forward(&dynamic_decode_output_tensors, &dynamic_decode_input_tensors);
 }
 
-template<typename T>
-bool LlamaV2<T>::get_medusa_enable()
-{
-    return medusa_num_heads_ != 0;
-}
-
 static inline Tensor slice(const Tensor& tensor, int index)
 {
     auto shape = tensor.shape;

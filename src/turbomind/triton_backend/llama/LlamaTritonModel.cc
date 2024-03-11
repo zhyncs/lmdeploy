@@ -104,11 +104,8 @@ void LlamaTritonModel<T>::handleMissingParams()
         TM_LOG_WARNING("[LlamaTritonModel] `max_context_token_num` = %d.", (int)engine_params_.max_context_token_num);
     }
 
-    if (!engine_params_.step_length && medusa_num_heads_ == 0) {
+    if (!engine_params_.step_length) {
         engine_params_.step_length = 1;
-    }
-    else if (medusa_num_heads_ != 0) {
-        engine_params_.step_length = 0;
     }
 
     if (!engine_params_.cache_max_block_count) {
