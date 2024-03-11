@@ -647,7 +647,15 @@ __global__ void topk_only(const T* __restrict log_probs,
 
     TopK_2<T>  partial;
     const bool IS_FP16   = std::is_same<T, half>::value;
-    const T    MAX_T_VAL = (IS_FP16) ? HALF_FLT_MAX : FLT_MAX;
+    T    MAX_T_VAL = (IS_FP16) ? HALF_FLT_MAX : FLT_MAX;
+
+#ifdef ENABLE_BF16
+    const bool IS_BF16   = std::is_same<T, __nv_bfloat16>::value;
+    if (IS_BF16){
+        const __nv_bfloat16 BF16_MAX_VAL = __ushort_as_bfloat16((unsigned short)0x7F7FU);
+        MAX_T_VAL = static_cast<T>(BF16_MAX_VAL); // T is bf16， 这里是过编译
+    }
+#endif
 
     for (int elem_id = tid; elem_id < vocab_size; elem_id += BLOCK_SIZE_) {
         int index            = elem_id + tmp_log_buf_index;

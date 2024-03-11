@@ -74,6 +74,7 @@ public:
     {
         if (is_allocated) {
             allocator_->free((void**)&topk_output_ids_);
+            allocator_->free((void**)&input_buf_);
         }
     }
 
