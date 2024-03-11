@@ -39,7 +39,8 @@ target_link_libraries(Llama PUBLIC CUDA::cudart
         nccl_utils
         cuda_utils
         logger
-        llama_fmha)
+        llama_fmha
+        Medusa)
 
 if (NOT MSVC)
         add_subdirectory(flash_attention2)

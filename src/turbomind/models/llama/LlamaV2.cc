@@ -32,6 +32,7 @@
 #include "src/turbomind/models/llama/llama_params.h"
 #include "src/turbomind/models/llama/llama_utils.h"
 #include "src/turbomind/models/llama/unified_decoder.h"
+#include "src/turbomind/models/medusa_plugin/medusa_head.h"
 #include "src/turbomind/utils/Tensor.h"
 #include "src/turbomind/utils/cuda_utils.h"
 #include "src/turbomind/utils/logger.h"
@@ -63,7 +64,9 @@ LlamaV2<T>::LlamaV2(size_t                       head_num,
                     cublasMMWrapper*             cublas_wrapper,
                     IAllocator*                  allocator,
                     bool                         is_free_buffer_after_forward,
-                    cudaDeviceProp*              cuda_device_prop):
+                    cudaDeviceProp*              cuda_device_prop,
+                    int                          medusa_num_heads,
+                    int                          medusa_num_layers):
     head_num_(head_num),
     size_per_head_(size_per_head),
     inter_size_(inter_size),
@@ -85,8 +88,9 @@ LlamaV2<T>::LlamaV2(size_t                       head_num,
     is_free_buffer_after_forward_(is_free_buffer_after_forward),
     cuda_device_prop_(cuda_device_prop),
     debug_(isDebug()),
-    shared_state_(shared_state)
-
+    shared_state_(shared_state),
+    medusa_num_heads_(medusa_num_heads),
+    medusa_num_layers_(medusa_num_layers)
 {
     TM_LOG_DEBUG(__PRETTY_FUNCTION__);
     TM_LOG_INFO("NCCL group_id = %d", tensor_para_.group_id_);
@@ -94,12 +98,17 @@ LlamaV2<T>::LlamaV2(size_t                       head_num,
     vocab_size_padded_ =
         (vocab_size_padded_ + tensor_para_.world_size_ - 1) / tensor_para_.world_size_ * tensor_para_.world_size_;
 
-    batch_ = std::make_unique<LlamaBatch<T>>(engine_params, cache_block_seq_len, quant_policy, this);
+    batch_ = std::make_unique<LlamaBatch<T>>(engine_params, cache_block_seq_len, quant_policy, this, medusa_num_heads_);
 
     initialize(attn_params, kv_head_num, use_context_fmha, cache_block_seq_len, quant_policy);
 
     /// TODO: decouple Llama model and batch inference
     batch_->Start();
+
+    if (medusa_num_heads_ != 0) {
+        medusa_head_ = std::make_unique<MedusaHead<T>>(
+            hidden_units_, vocab_size_, medusa_num_heads_, stream_, cublas_wrapper_, allocator_, tensor_para_, false);
+    }
 }
 
 template<typename T>
@@ -396,6 +405,12 @@ void LlamaV2<T>::dynamicDecode(int*            token_ids,
     }
 
     dynamic_decode_layer_->forward(&dynamic_decode_output_tensors, &dynamic_decode_input_tensors);
+}
+
+template<typename T>
+bool LlamaV2<T>::get_medusa_enable()
+{
+    return medusa_num_heads_ != 0;
 }
 
 static inline Tensor slice(const Tensor& tensor, int index)

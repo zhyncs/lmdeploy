@@ -13,7 +13,7 @@ namespace turbomind {
 template<typename T>
 MedusaHead<T>::MedusaHead(size_t           in_size,
                           size_t           vocab_size,
-                          size_t           medusa_num_heads,
+                          int              medusa_num_heads,
                           cudaStream_t     stream,
                           cublasMMWrapper* cublas_wrapper,
                           IAllocator*      allocator,

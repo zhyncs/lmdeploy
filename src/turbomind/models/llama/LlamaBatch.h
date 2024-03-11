@@ -98,7 +98,8 @@ public:
                              const std::vector<int>&             lengths,
                              const std::vector<const Sequence*>& sequences);
 
-    explicit LlamaBatch(const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model);
+    explicit LlamaBatch(
+        const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model, int medusa_num_heads);
 
     ~LlamaBatch()
     {
@@ -304,6 +305,8 @@ private:
     const int num_tokens_per_iter_;
     const int extra_tokens_per_iter_;
     const int max_prefill_iters_;
+
+    int medusa_num_heads_;
 };
 
 }  // namespace turbomind

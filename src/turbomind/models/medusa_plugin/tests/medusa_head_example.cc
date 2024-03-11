@@ -37,7 +37,7 @@ template<typename T>
 class MedusaHeadExample {
 public:
     MedusaHeadExample(size_t                      batch_size,
-                      size_t                      medusa_num_heads,
+                      int                         medusa_num_heads,
                       size_t                      medusa_num_layers,
                       size_t                      hidden_size,
                       size_t                      vocab_size,
@@ -123,7 +123,7 @@ public:
 private:
     size_t batch_size_;
     size_t medusa_num_layers_;
-    size_t medusa_num_heads_;
+    int    medusa_num_heads_;
     size_t hidden_size_;
     size_t vocab_size_;
 
