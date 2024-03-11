@@ -158,6 +158,8 @@ private:
                        size_t          token_ids_len,
                        size_t          batch_size);
 
+    void medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size);
+
 private:
     friend class LlamaBatch<T>;
 

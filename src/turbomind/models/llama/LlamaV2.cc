@@ -523,6 +523,22 @@ void LlamaV2<T>::forward(std::unordered_map<std::string, Tensor>*       outputs,
     }
 }
 
+template<typename T>
+void LlamaV2<T>::medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size)
+{
+    turbomind::DataType dtype = turbomind::getTensorType<T>();
+
+    turbomind::TensorMap inputs{
+        {"medusa_head_input", {turbomind::MEMORY_GPU, dtype, {batch_size, hidden_units_}, input_buf}},
+    };
+
+    turbomind::TensorMap outputs{
+        {"medusa_head_output", {turbomind::MEMORY_GPU, dtype, {medusa_num_heads_, batch_size, 1}, topk_output_ids}},
+    };
+
+    medusa_head_->forward(&outputs, &inputs, weights_->get_medusa_weight());
+}
+
 template class LlamaV2<half>;
 template class LlamaV2<float>;
 #ifdef ENABLE_BF16
