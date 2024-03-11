@@ -39,6 +39,8 @@
 #include <functional>
 #include <memory>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
 namespace turbomind {
 
@@ -521,6 +523,30 @@ void LlamaV2<T>::medusaForward(int* topk_output_ids, const T* input_buf, const s
     };
 
     medusa_head_->forward(&outputs, &inputs, weights_->get_medusa_weight());
+}
+
+template<typename T>
+void LlamaV2<T>::batchDynamicDecode(
+    int* output_ids, const float* logits, const int* end_ids, curandState_t* curand_state, size_t batch_size)
+{
+    const int                               step             = 0;
+    const int                               max_input_length = 0;
+    const int                               ite              = 0;
+    std::unordered_map<std::string, Tensor> input_tensors{
+        {"logits", {MEMORY_GPU, TYPE_FP32, {batch_size, 1, vocab_size_}, logits}},
+        {"step", {MEMORY_CPU, TYPE_INT32, {1}, &step}},
+        {"max_input_length", {MEMORY_CPU, TYPE_INT32, {1}, &max_input_length}},
+        {"end_id", {MEMORY_GPU, TYPE_INT32, {batch_size}, end_ids}},
+        {"ite", {MEMORY_CPU, TYPE_INT32, {1}, &ite}},
+        {"local_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &batch_size}}};
+
+    std::unordered_map<std::string, Tensor> output_tensors{
+        {"output_ids", {MEMORY_GPU, TYPE_INT32, {1, batch_size, 1}, output_ids}},
+        {"curand_state", {MEMORY_GPU, TYPE_VOID, {batch_size}, curand_state}}};
+
+    TensorMap runtime_args;
+    dynamic_decode_layer_->setup(batch_size, 1, &runtime_args);
+    dynamic_decode_layer_->forward(&output_tensors, &input_tensors);
 }
 
 template class LlamaV2<half>;

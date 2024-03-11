@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <type_traits>
+#include <unordered_set>
 
 namespace turbomind {
 
@@ -94,6 +95,13 @@ public:
                              const std::vector<int>&             indices,
                              const std::vector<int>&             lengths,
                              const std::vector<const Sequence*>& sequences);
+
+    void GetReferenceOutputIds(T*                             context_decoder_output,
+                               const std::vector<int>&        indices,
+                               const std::vector<int>&        lengths,
+                               const std::unordered_set<int>& inited_seq_idx_set,
+                               curandState_t*                 curand_state,
+                               const int                      inited_token_num);
 
     explicit LlamaBatch(
         const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model, int medusa_num_heads);
@@ -296,6 +304,12 @@ private:
 
     int  medusa_num_heads_ = 0;
     bool medusa_enable_    = false;
+
+    T*     medusa_context_decoder_output_buf_{};
+    float* medusa_context_logits_buf_{};
+    float* local_medusa_context_logits_buf_{};
+    int*   medusa_end_ids_buf_{};
+    int*   medusa_output_ids_buf_{};
 };
 
 }  // namespace turbomind

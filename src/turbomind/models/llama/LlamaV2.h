@@ -149,6 +149,8 @@ private:
                        size_t          batch_size);
 
     void medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size);
+    void batchDynamicDecode(
+        int* token_ids, const float* logits, const int* end_ids, curandState_t* curand_state, size_t batch_size);
 
 private:
     friend class LlamaBatch<T>;
