@@ -906,8 +906,8 @@ void invokeBatchedCopy(void** src_ptr, void** dst_ptr, int* size, int count, cud
 }
 
 template<int BLOCK_SIZE_>
-__global__ void medusaBatchedMatchKernel(const int* __restrict__ output_ids1,
-                                         const int* __restrict__ output_ids2,
+__global__ void medusaBatchedMatchKernel(const int* __restrict__ input_ids,
+                                         const int* __restrict__ output_ids,
                                          int*      match_idx,
                                          int*      match_length,
                                          const int path_num,
@@ -915,7 +915,7 @@ __global__ void medusaBatchedMatchKernel(const int* __restrict__ output_ids1,
 {
     //[b, path_num, 1 + head_num]
     const int length  = size + 1;
-    const int limit_r = gridDim.x * blockDim.x * length;
+    const int limit_r = gridDim.x * path_num * length;
     const int bid     = blockIdx.x;   // (0, batch_size)
     const int tid     = threadIdx.x;  // (0, BLOCK_SIZE_)
 
@@ -929,7 +929,7 @@ __global__ void medusaBatchedMatchKernel(const int* __restrict__ output_ids1,
         int start_id          = bid * path_num * length + idx * length;  // belong to (bid, path_id)
         int accumulate_length = 0;
         for (int i = 0; i < size && (start_id + i) < limit_r; ++i) {
-            if (output_ids1[start_id + i + 1] == output_ids2[start_id + i]) {
+            if (input_ids[start_id + i + 1] == output_ids[start_id + i]) {
                 ++accumulate_length;
             }
             else {
