@@ -15,10 +15,18 @@
 #include "src/turbomind/utils/cuda_utils.h"
 #include <condition_variable>
 #include <mutex>
-#include <ostream>
 #include <type_traits>
 
 namespace turbomind {
+
+struct MedusaState {
+    int  index;
+    int  len;
+    int  verified_len;
+    bool inited;
+
+    friend std::ostream& operator<<(std::ostream& os, const MedusaState& medusa_state);
+};
 
 struct BatchState {
     int*  h_prompt_length;  // history + input, ignore generated
@@ -39,15 +47,6 @@ struct BatchState {
     // |<----------- active ----------->|<-- inactive -->|
     int active_size;
     int size;
-};
-
-struct MedusaState {
-    int  index;
-    int  len;
-    int  verified_len;
-    bool inited;
-
-    friend std::ostream& operator<<(std::ostream& os, const MedusaState& medusa_state);
 };
 
 template<typename T>
@@ -200,13 +199,7 @@ private:
                     const int                 index,
                     const Sequence&           seq);
     void MedusaCopy(const int mini_batch_size, const int first);
-    void MedusaVerify(const int inited_index);
-    void MedusaGenerate(const int         inited_index,
-                        const int         new_index,
-                        std::vector<int>& new_seq_lm_head_output_ids,
-                        std::vector<int>& new_seq_topk_output_ids,
-                        std::vector<int>& inited_seq_lm_head_output_ids,
-                        std::vector<int>& inited_seq_topk_output_ids);
+    void MedusaVerify(const int inited_index, const int max_init_ctx_len);
 
 private:
     const int  max_batch_size_;
@@ -318,25 +311,32 @@ private:
     const int extra_tokens_per_iter_;
     const int max_prefill_iters_;
 
-    int                      medusa_num_heads_ = 0;
-    bool                     medusa_enable_    = false;
+    int  medusa_num_heads_ = 0;
+    bool medusa_enable_    = false;
+
     std::vector<MedusaState> medusa_state_vec_;
 
-    T* medusa_inited_seq_hidden_states_buf_{};
-    T* medusa_new_seq_last_hidden_state_buf_{};
-    T* medusa_inited_seq_verified_last_hidden_state_buf_{};
+    // used for verification
+    T*   medusa_inited_hidden_states_buf_{};  // updated in MedusaCopy
+    int* medusa_inited_input_ids_buf_{};      // updated in MedusaCopy
 
-    int* medusa_inited_input_ids_buf_{};
+    // used for generation
+    T* medusa_all_hidden_states_buf_{};       // updated in MedusaCopy
+    T* medusa_verified_hidden_states_buf_{};  // updated in MedusaVerify
 
+    // used for logits
     float* medusa_logits_buf_{};
     float* medusa_local_logits_buf_{};
 
-    int* medusa_output_ids_buf_{};
-    int* medusa_end_ids_buf_{};
-    int* medusa_verified_last_output_ids_buf_{};
+    // used for sampling
+    int*  medusa_token_ids_buf_{};
+    bool* medusa_finished_buf_{};
+    int*  medusa_sequence_lengths_{};
 
-    int* max_match_length_buf_{};
-    int* h_max_match_length_buf_{};
+    // used for verification
+    int* medusa_ref_output_ids_buf_{};
+    int* medusa_max_match_length_buf_{};
+    int* h_medusa_max_match_length_buf_{};
 };
 
 }  // namespace turbomind
