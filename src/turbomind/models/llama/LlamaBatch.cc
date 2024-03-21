@@ -759,6 +759,9 @@ void LlamaBatch<T>::AllocateBuffer(size_t batch_size, size_t session_len)
     h_medusa_max_match_length_buf_ =
         (int*)allocator_->reMalloc(h_medusa_max_match_length_buf_, sizeof(int) * batchxbeam, true, true);
 
+    medusa_topk_output_ids_buf_ =
+        (int*)allocator_->reMalloc(medusa_topk_output_ids_buf_, sizeof(int) * medusa_num_heads_ * batchxbeam, true);
+
     is_allocate_buffer_ = true;
 }
 
@@ -934,6 +937,8 @@ void LlamaBatch<T>::FreeBuffer()
         allocator_->free((void**)&h_seq_limit_len_, true);
 
         allocator_->free((void**)&h_output_ids_, true);
+
+        allocator_->free((void**)&medusa_topk_output_ids_buf_);
 
         is_allocate_persistant_buffer_ = false;
     }
@@ -1636,62 +1641,78 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
     std::fill(h_input_length_buf_, h_input_length_buf_ + active_size, 0);
 
     // `SequenceManager` needs real-time value of cache length
+    int inited_idx = 0;
     for (int i = 0; i < active_size; ++i) {
         if (state_->requests[i]) {
             FT_CHECK(state_->sequences[i]);
-            state_->sequences[i]->cache_len += state_->sequences[i]->input_length;
+            if (medusa_enable_) {
+                state_->sequences[i]->iter += 1;
+                if (medusa_state_vec_[i].inited) {
+                    medusa_state_vec_[i].verified_len = 1 + h_medusa_max_match_length_buf_[inited_idx++];
+                }
+                state_->sequences[i]->cache_len += medusa_state_vec_[i].verified_len;
+            }
+            else {
+                state_->sequences[i]->cache_len += state_->sequences[i]->input_length;
+            }
         }
     }
 
-    bool should_stop{};
+    if (!medusa_enable_) {
+        bool should_stop{};
 
-    if (active_size > g.partial) {
-        model_->postDecodeEmbedding(logits_buf_, local_logits_buf_, decoder_output_buf_, active_size - g.partial);
+        if (active_size > g.partial) {
+            model_->postDecodeEmbedding(logits_buf_, local_logits_buf_, decoder_output_buf_, active_size - g.partial);
 
-        FT_CHECK(g.step >= 0);
+            FT_CHECK(g.step >= 0);
 
-        // TM_LOG_INFO("dyn decode bsz %d, partial %d", active_size, g.partial);
+            // TM_LOG_INFO("dyn decode bsz %d, partial %d", active_size, g.partial);
 
-        // stop-words & bad-words require the matched tokens to be contiguous, so item size > 1 is
-        // not supported yet.
-        model_->dynamicDecode(token_ids_buf_,
-                              finished_buf_,
-                              sequence_lengths_,
-                              &should_stop,
-                              state_->curand_state,
-                              &inputs_,
-                              &outputs_,
-                              logits_buf_,
-                              seq_limit_len_,
-                              init_context_length_,
-                              d_end_ids_buf_,
-                              g.step,
-                              0,
-                              g.max_init_ctx_len,
-                              session_len_ * 2,
-                              active_size - g.partial);
-    }
-
-    if (debug_ && rank_ == 0) {
-        std::vector<int> curr(active_size);
-        Copy(token_ids_buf_ + g.step * active_size, active_size, curr.data());
-        cudaStreamSynchronize(stream_);
-        std::stringstream scurr;
-        for (int k = 0; k < curr.size(); ++k) {
-            scurr << std::setw(6) << curr[k];
+            // stop-words & bad-words require the matched tokens to be contiguous, so item size > 1 is
+            // not supported yet.
+            model_->dynamicDecode(token_ids_buf_,
+                                  finished_buf_,
+                                  sequence_lengths_,
+                                  &should_stop,
+                                  state_->curand_state,
+                                  &inputs_,
+                                  &outputs_,
+                                  logits_buf_,
+                                  seq_limit_len_,
+                                  init_context_length_,
+                                  d_end_ids_buf_,
+                                  g.step,
+                                  0,
+                                  g.max_init_ctx_len,
+                                  session_len_ * 2,
+                                  active_size - g.partial);
         }
-        TM_LOG_INFO("[Forward] step = %d, [%s]", g.step - 1, scurr.str().c_str());
+
+        if (debug_ && rank_ == 0) {
+            std::vector<int> curr(active_size);
+            Copy(token_ids_buf_ + g.step * active_size, active_size, curr.data());
+            cudaStreamSynchronize(stream_);
+            std::stringstream scurr;
+            for (int k = 0; k < curr.size(); ++k) {
+                scurr << std::setw(6) << curr[k];
+            }
+            TM_LOG_INFO("[Forward] step = %d, [%s]", g.step - 1, scurr.str().c_str());
+        }
+
+        // check_cuda_error(cudaStreamSynchronize(stream_));
+
+        ////////////////////////////////////////////////
+        /// ! increase the counters
+        g.step += 1;
+
+        // PrintDecodeTokens(token_ids_buf_, g.step, active_size, stream_, "Forward");
+
+        return !should_stop;
     }
 
-    // check_cuda_error(cudaStreamSynchronize(stream_));
-
-    ////////////////////////////////////////////////
-    /// ! increase the counters
+    // FIXME
     g.step += 1;
-
-    // PrintDecodeTokens(token_ids_buf_, g.step, active_size, stream_, "Forward");
-
-    return !should_stop;
+    return true;
 }
 
 std::ostream& operator<<(std::ostream& os, const MedusaState& medusa_state)
@@ -1829,6 +1850,77 @@ void LlamaBatch<T>::MedusaVerify(const int inited_index, const int max_init_ctx_
                                stream_);
         int* h_medusa_max_match_length_dst = h_medusa_max_match_length_buf_;
         Copy(medusa_max_match_length_buf_, inited_index, h_medusa_max_match_length_dst);
+    }
+}
+
+template<typename T>
+void LlamaBatch<T>::MedusaGenerate(const int inited_index, const int new_index, const int max_init_ctx_len)
+{
+    int batch_size = inited_index + new_index;
+
+    if (batch_size != 0) {
+        // gather last verified hidden states
+        int hidden_size                           = model_->hidden_units_;
+        T*  medusa_verified_hidden_states_buf_dst = medusa_verified_hidden_states_buf_;
+        int inited_idx                            = 0;
+        for (int i = 0; i < batch_size; i++) {
+            T* medusa_all_hidden_states_buf_src =
+                medusa_all_hidden_states_buf_ + i * (1 + medusa_num_heads_) * hidden_size;
+            if (medusa_state_vec_[i].inited) {
+                // inited seq last verified
+                medusa_verified_hidden_states_buf_dst =
+                    Copy(medusa_all_hidden_states_buf_src + h_medusa_max_match_length_buf_[inited_idx++] * hidden_size,
+                         hidden_size,
+                         medusa_verified_hidden_states_buf_dst);
+            }
+            else {
+                // new seq first
+                medusa_verified_hidden_states_buf_dst =
+                    Copy(medusa_all_hidden_states_buf_src, hidden_size, medusa_verified_hidden_states_buf_dst);
+            }
+        }
+
+        // lm head linear
+        if (medusa_logits_buf_ == nullptr) {
+            NcclGuard guard(model_->tensor_para_, stream_, true);
+            medusa_logits_buf_ = (float*)allocator_->malloc(sizeof(float) * model_->vocab_size_padded_ * max_batch_size_
+                                                            * (1 + medusa_num_heads_));
+            const auto tp      = model_->tensor_para_.world_size_;
+            if (tp > 1) {
+                FT_CHECK(model_->vocab_size_padded_ % tp == 0);
+                medusa_local_logits_buf_ = (float*)allocator_->malloc(sizeof(float) * model_->vocab_size_padded_
+                                                                      * max_batch_size_ * (1 + medusa_num_heads_));
+            }
+        }
+        bool should_stop{};
+        model_->postDecodeEmbedding(
+            medusa_logits_buf_, medusa_local_logits_buf_, medusa_verified_hidden_states_buf_, batch_size);
+
+        // sampling
+        model_->dynamicDecode(medusa_token_ids_buf_,
+                              medusa_finished_buf_,
+                              medusa_sequence_lengths_,
+                              &should_stop,
+                              state_->curand_state,
+                              &inputs_,
+                              &outputs_,
+                              medusa_logits_buf_,
+                              seq_limit_len_,
+                              init_context_length_,
+                              d_end_ids_buf_,
+                              0,
+                              0,
+                              max_init_ctx_len,
+                              session_len_ * 2,
+                              batch_size);
+
+        // medusa forward
+        model_->medusaForward(medusa_topk_output_ids_buf_, medusa_verified_hidden_states_buf_, batch_size);
+
+        // medusa_token_ids_buf_ [1, batch_size] no need transpose
+        // medusa_topk_output_ids_buf_ [batch_size, medusa_num_heads]
+        // [batch_size, 1+medusa_num_heads]
+        // TODO append token_ids_buf_, update sequence_lengths_
     }
 }
 

@@ -200,6 +200,7 @@ private:
                     const Sequence&           seq);
     void MedusaCopy(const int mini_batch_size, const int first);
     void MedusaVerify(const int inited_index, const int max_init_ctx_len);
+    void MedusaGenerate(const int inited_index, const int new_index, const int max_init_ctx_len);
 
 private:
     const int  max_batch_size_;
@@ -337,6 +338,8 @@ private:
     int* medusa_ref_output_ids_buf_{};
     int* medusa_max_match_length_buf_{};
     int* h_medusa_max_match_length_buf_{};
+
+    int* medusa_topk_output_ids_buf_{};
 };
 
 }  // namespace turbomind
