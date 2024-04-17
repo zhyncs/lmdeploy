@@ -267,6 +267,8 @@ void LlamaBatch<T>::ProcessInferRequests(const Requests& requests)
         const auto output_ids_base = state.output_ids + session_len_ * idx;
         auto       output_ids      = output_ids_base;
 
+        auto incoming_input_ids = state.input_ids + session_len_ * idx;
+
         // copy history tokens
         if (!seq.tokens.empty()) {
             output_ids = Copy(seq.tokens.data(), seq.tokens.size(), output_ids);
@@ -275,6 +277,8 @@ void LlamaBatch<T>::ProcessInferRequests(const Requests& requests)
         // copy input tokens
         if (input_length) {
             output_ids = Copy(input_ids, input_length, output_ids);
+
+            Copy(input_ids, input_length, incoming_input_ids);
         }
 
         // copy input embeddings
@@ -676,7 +680,8 @@ void LlamaBatch<T>::CopyState(const std::vector<std::tuple<BatchState*, BatchSta
         IndexedCopy(s_idx,
                     d_idx,
                     std::tuple{s->output_ids, d->output_ids, session_len_},
-                    std::tuple{s->curand_state, d->curand_state, 1});
+                    std::tuple{s->curand_state, d->curand_state, 1},
+                    std::tuple{s->input_ids, d->input_ids, session_len_});
     }
 
     for (const auto& [s, d, si, di] : desc) {
@@ -794,6 +799,7 @@ void LlamaBatch<T>::AllocatePersistantBuffer(size_t max_batch_size)
 
     for (auto& s : states_) {
         s.output_ids = (int*)allocator_->reMalloc(s.output_ids, sizeof(int) * max_batch_size * session_len_, true);
+        s.input_ids  = (int*)allocator_->reMalloc(s.input_ids, sizeof(int) * max_batch_size * session_len_, true);
         s.curand_state =
             (curandState_t*)allocator_->reMalloc(s.curand_state, sizeof(curandState_t) * max_batch_size, true);
     }
@@ -903,6 +909,7 @@ void LlamaBatch<T>::FreeBuffer()
             allocator_->free((void**)&s.h_finished, true);
             allocator_->free((void**)&s.h_rope_theta, true);
             allocator_->free((void**)&s.output_ids);
+            allocator_->free((void**)&s.input_ids);
             allocator_->free((void**)&s.curand_state);
         }
         allocator_->free((void**)&h_cu_block_counts_, true);
@@ -1206,13 +1213,22 @@ auto LlamaBatch<T>::Finish(GenerationState& g) -> std::vector<Signal>
 
         // [s,b] -> [b,s] and skip padding in [context_len, max_context_len)
         invokeGatherOutput(state_->output_ids,
+                           state_->input_ids,
                            token_ids_buf_,
+                           nullptr,
+                           nullptr,
                            init_context_length_,
                            g.max_init_ctx_len,
                            g.step,
                            session_len_,
                            batch_size - g.partial,
+                           1,
                            stream_);
+
+        Clear(token_ids_buf_, batch_size * session_len_);
+        invokeTransposeAxis01(token_ids_buf_, state_->output_ids, batch_size, session_len_, 1, stream_);
+        invokePadLastTokenIds(token_ids_buf_, init_context_length_, g.max_init_ctx_len, batch_size, stream_);
+
         sync_check_cuda_error();
     }
 
@@ -1531,7 +1547,8 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
             // const int   missing    = state_->h_context_length[i] - seq.cache_len;
             FT_CHECK(seq.input_length >= 1);
             h_input_length_buf_[i] = seq.input_length;
-            input_d_ptrs[i]        = state_->output_ids + i * session_len_ + seq.cache_len;
+            input_d_ptrs[i]        = state_->input_ids + i * session_len_;
+
             if (seq.input_length > 1 && pf_offset < 0) {
                 pf_offset = i;
             }
