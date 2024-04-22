@@ -351,14 +351,30 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
     }
 
     if (input_tensors->isExist("sequence_limit_length")) {
-        invokeLengthCriterion(output_tensors->at("finished").getPtr<bool>(),
-                              output_tensors->at("should_stop").getPtr<bool>(),
-                              h_pinned_finished_sum_,
-                              input_tensors->at("sequence_limit_length").getPtr<const uint32_t>(),
-                              batch_size,
-                              beam_width,
-                              step,
-                              stream_);
+        int cache_step = 0;
+        if (input_tensors->isExist("cache_step")) {
+            cache_step = input_tensors->at("cache_step").getVal<int>();
+        }
+        if (cache_step != 0) {
+            invokeLengthCriterion(output_tensors->at("finished").getPtr<bool>(),
+                                  output_tensors->at("should_stop").getPtr<bool>(),
+                                  h_pinned_finished_sum_,
+                                  input_tensors->at("sequence_limit_length").getPtr<const uint32_t>(),
+                                  batch_size,
+                                  beam_width,
+                                  step + cache_step,
+                                  stream_);
+        }
+        else {
+            invokeLengthCriterion(output_tensors->at("finished").getPtr<bool>(),
+                                  output_tensors->at("should_stop").getPtr<bool>(),
+                                  h_pinned_finished_sum_,
+                                  input_tensors->at("sequence_limit_length").getPtr<const uint32_t>(),
+                                  batch_size,
+                                  beam_width,
+                                  step,
+                                  stream_);
+        }
     }
 }
 

@@ -272,8 +272,8 @@ __global__ void gatherOutput(int*       output_ids,
             // gather next input ids
             const int input_dst_idx       = src_idx - (max_gen_step - stride_len);
             next_input_ids[input_dst_idx] = ids[src_idx * batch_size + batch_id];
+            const int last_src_idx        = src_idx - (max_gen_step - stride_len);
 
-            const int last_src_idx = src_idx - max_context_len;
             if (src_idx != max_gen_step - 1 && last_src_idx == 0) {
                 continue;
             }
@@ -606,68 +606,6 @@ void invokeBatchedCopy(void** src_ptr, void** dst_ptr, int* size, int count, cud
                     BatchedCopyLauncher<BatchedCopyParam<T, C>>{max_size, count, &params, st});
             }
         });
-}
-
-template<int BLOCK_SIZE_>
-__global__ void medusaBatchedMatchKernel(const int* __restrict__ input_ids,
-                                         const int* __restrict__ output_ids,
-                                         int*      match_length,
-                                         const int path_num,
-                                         int       size)
-{
-    //[b, path_num, 1 + head_num]
-    const int length  = size + 1;
-    const int limit_r = gridDim.x * path_num * length;
-    const int bid     = blockIdx.x;   // (0, batch_size)
-    const int tid     = threadIdx.x;  // (0, BLOCK_SIZE_)
-
-    typedef cub::BlockReduce<TopK_2<int>, BLOCK_SIZE_> BlockReduce;
-    __shared__ typename BlockReduce::TempStorage       temp_storage;
-
-    TopK_2<int> partial;
-    partial.init();
-
-    for (int idx = tid; idx < path_num; idx += BLOCK_SIZE_) {
-        int start_id          = bid * path_num * length + idx * length;  // belong to (bid, path_id)
-        int accumulate_length = 0;
-        for (int i = 0; i < size && (start_id + i) < limit_r; ++i) {
-            if (input_ids[start_id + i + 1] == output_ids[start_id + i]) {
-                ++accumulate_length;
-            }
-            else {
-                break;
-            }
-        }
-        partial.insert(accumulate_length, idx);
-    }
-
-    TopK_2<int> total = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2<int>);
-
-    if (tid == 0) {
-        const int index     = bid;
-        match_length[index] = total.u;
-    }
-    __syncthreads();
-}
-
-void invokeMedusaBatchMatch(const int*   input_ids,
-                            const int*   output_ids,
-                            int*         max_match_length,
-                            int          batch_size,
-                            int          path_num,
-                            int          medusa_head_num,
-                            cudaStream_t stream)
-{
-    // inputs:
-    // input_ids: [batch_size, path_num, 1 + medusa_head_num]
-    // output_ids: [batch_size, path_num, 1 + medusa_head_num]
-    // outputs:
-    // max_match_length: [batch_size]
-    dim3 grid, block;
-    grid.x  = batch_size;
-    block.x = 64;
-    medusaBatchedMatchKernel<64>
-        <<<grid, block, 0, stream>>>(input_ids, output_ids, max_match_length, path_num, medusa_head_num);
 }
 
 }  // namespace turbomind

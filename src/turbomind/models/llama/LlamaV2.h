@@ -154,7 +154,8 @@ private:
                        int             ite,
                        size_t          max_context_len,
                        size_t          token_ids_len,
-                       size_t          batch_size);
+                       size_t          batch_size,
+                       int             cache_step);
 
     void medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size);
 

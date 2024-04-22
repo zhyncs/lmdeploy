@@ -19,6 +19,15 @@
 
 namespace turbomind {
 
+struct MedusaState {
+    int  index;
+    int  len;
+    int  verified_len;
+    bool inited;
+
+    friend std::ostream& operator<<(std::ostream& os, const MedusaState& medusa_state);
+};
+
 struct BatchState {
     int*  h_prompt_length;  // history + input, ignore generated
     int*  h_context_length;
@@ -184,6 +193,14 @@ private:
     {
         IndexedCopyImpl(nullptr, nullptr, count, cpys...);
     }
+    void MedusaInit(std::vector<MedusaState>& medusa_state_vec,
+                    int&                      inited_index,
+                    int&                      new_index,
+                    const int                 index,
+                    const Sequence&           seq);
+    void MedusaCopy(const int mini_batch_size, const int first);
+    void MedusaVerify(const int inited_index, const int max_init_ctx_len);
+    bool MedusaGenerate(const int inited_index, const int new_index, const int max_init_ctx_len, int& step);
 
 private:
     const int  max_batch_size_;
@@ -305,6 +322,36 @@ private:
 
     int  medusa_num_heads_ = 0;
     bool medusa_enable_    = false;
+
+    std::vector<MedusaState> medusa_state_vec_;
+
+    T* medusa_all_hidden_states_buf_{};
+    T* medusa_verified_hidden_states_buf_{};
+
+    T*   medusa_inited_hidden_states_buf_{};
+    int* medusa_inited_input_ids_buf_{};
+
+    // used for logits
+    float* medusa_logits_buf_{};
+    float* medusa_local_logits_buf_{};
+
+    // used for sampling
+    int*  medusa_token_ids_buf_{};
+    bool* medusa_finished_buf_{};
+    int*  medusa_sequence_lengths_{};
+
+    // used for verification
+    int* medusa_ref_output_ids_buf_{};
+    int* medusa_max_match_length_buf_{};
+    int* h_medusa_max_match_length_buf_{};
+
+    int* medusa_topk_output_ids_buf_{};
+
+    int* medusa_verified_length_{};
+
+    int* last_input_ids_buf_{};
+
+    int max_len_ = 0;
 };
 
 }  // namespace turbomind

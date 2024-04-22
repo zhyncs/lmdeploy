@@ -28,10 +28,12 @@ MedusaWeight<T>::MedusaWeight(int        medusa_num_heads,
     tensor_para_rank_(tensor_para_rank)
 {
     heads_weights_.resize(medusa_num_heads_);
-    std::fill_n(
-        heads_weights_.begin(),
-        medusa_num_heads_,
-        LlamaDenseWeight<T>{hidden_size_ / tensor_para_size_, vocab_size_, nullptr, weight_type_, nullptr, nullptr, 0});
+    std::for_each(heads_weights_.begin(), heads_weights_.end(), [this](auto& heads_weight) {
+        heads_weight.input_dims  = hidden_size_ / tensor_para_size_;
+        heads_weight.output_dims = vocab_size_;
+        heads_weight.type        = weight_type_;
+        heads_weight.group_size  = 0;
+    });
 
     resblocks_weights_.resize(medusa_num_heads_);
     std::fill_n(resblocks_weights_.begin(), medusa_num_heads_, std::vector<LlamaDenseWeight<T>>(medusa_num_layers_));
