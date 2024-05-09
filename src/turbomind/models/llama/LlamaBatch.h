@@ -10,6 +10,7 @@
 #include "src/turbomind/models/llama/SequenceManager.h"
 #include "src/turbomind/models/llama/llama_kernels.h"
 #include "src/turbomind/models/llama/llama_params.h"
+#include "src/turbomind/models/medusa_plugin/medusa_util.h"
 #include "src/turbomind/utils/allocator.h"
 #include "src/turbomind/utils/cublasMMWrapper.h"
 #include "src/turbomind/utils/cuda_utils.h"
@@ -26,6 +27,7 @@ struct BatchState {
 
     curandState_t* curand_state;
     int*           output_ids;  // output ids in [B, S]
+    int*           input_ids;
 
     float* h_rope_theta;
 
@@ -95,7 +97,8 @@ public:
                              const std::vector<int>&             lengths,
                              const std::vector<const Sequence*>& sequences);
 
-    explicit LlamaBatch(const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model);
+    explicit LlamaBatch(
+        const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model, int medusa_num_heads);
 
     ~LlamaBatch()
     {
@@ -182,6 +185,70 @@ private:
     {
         IndexedCopyImpl(nullptr, nullptr, count, cpys...);
     }
+
+    void MedusaCopy(const int  mini_batch_size,
+                    const int  first,
+                    const int  hidden_size,
+                    const int  medusa_input_length,
+                    const int  active_size,
+                    const int  partial,
+                    const T*   context_decoder_output_buf,
+                    const int* context_decoder_ids_buf,
+                    const T*   decoder_output_buf,
+                    const int* h_input_length_buf,
+                    int&       inited_count,
+                    T*         medusa_all_hidden_states_buf,
+                    T*         medusa_inited_hidden_states_buf,
+                    int*       medusa_inited_input_ids_buf);
+
+    void MedusaVerify(const int      inited_count,
+                      const int      batch_size,
+                      const int      max_batch_size,
+                      const int      medusa_input_length,
+                      const int      hidden_size,
+                      const int      medusa_num_heads,
+                      const int      medusa_path_num,
+                      const T*       medusa_inited_hidden_states_buf,
+                      const int*     medusa_inited_input_ids_buf,
+                      float*         medusa_logits_buf,
+                      float*         medusa_local_logits_buf,
+                      int*           medusa_token_ids_buf,
+                      int*           medusa_input_tokens_buf,
+                      int*           medusa_output_tokens_buf,
+                      int*           medusa_each_path_len_buf,
+                      int*           medusa_max_match_length_buf,
+                      int*           medusa_max_match_idx_buf,
+                      int*           medusa_verified_length,
+                      int*           medusa_verified_packed_path,
+                      int*           h_medusa_max_match_length_buf,
+                      int*           h_medusa_max_match_idx_buf,
+                      int*           h_medusa_verified_length,
+                      int*           h_medusa_verified_packed_path,
+                      int*           h_medusa_last_match_idx_buf,
+                      curandState_t* curand_state,
+                      int*           end_ids);
+
+    void MedusaGenerate(const int      step,
+                        const int      batch_size,
+                        const int      hidden_size,
+                        const int      medusa_input_length,
+                        const int      medusa_num_heads,
+                        const int      medusa_top_k,
+                        const T*       medusa_all_hidden_states_buf,
+                        const int*     h_medusa_last_match_idx_buf,
+                        const int*     h_medusa_max_match_length_buf,
+                        const int*     h_medusa_max_match_idx_buf,
+                        bool&          medusa_should_stop,
+                        T*             medusa_verified_hidden_states_buf,
+                        float*         medusa_logits_buf,
+                        float*         medusa_local_logits_buf,
+                        int*           medusa_topk_output_ids_buf,
+                        int*           medusa_token_ids_buf,
+                        int*           token_ids_buf,
+                        int*           h_medusa_preds_batched_buf,
+                        int*           h_pseudo_inputs_buf,
+                        curandState_t* curand_state,
+                        int*           end_ids);
 
 private:
     const int  max_batch_size_;
@@ -300,6 +367,54 @@ private:
     const int num_tokens_per_iter_;
     const int extra_tokens_per_iter_;
     const int max_prefill_iters_;
+
+    int  medusa_num_heads_ = 0;
+    bool medusa_enable_    = false;
+
+    T*   medusa_inited_hidden_states_buf_{};
+    int* medusa_inited_input_ids_buf_{};
+
+    T* medusa_all_hidden_states_buf_{};
+    T* medusa_verified_hidden_states_buf_{};
+
+    float* medusa_logits_buf_{};
+    float* medusa_local_logits_buf_{};
+
+    int* medusa_token_ids_buf_{};
+
+    int* medusa_max_match_length_buf_{};
+    int* h_medusa_max_match_length_buf_{};
+    int* medusa_max_match_idx_buf_{};
+    int* h_medusa_max_match_idx_buf_{};
+    int* h_medusa_last_match_idx_buf_{};
+    int* h_pseudo_inputs_buf_{};
+    int* h_medusa_preds_batched_buf_{};
+    int* medusa_verified_packed_path_{};
+    int* h_medusa_verified_packed_path_{};
+
+    int* medusa_topk_output_ids_buf_{};
+
+    int* medusa_verified_length_{};
+    int* h_medusa_verified_length_{};
+    int* h_medusa_sequences_length_{};
+    int* h_medusa_cache_len_{};
+
+    int* medusa_context_length_begin_{};
+
+    int* last_input_ids_buf_{};
+
+    int medusa_input_length_ = 0;
+    int medusa_path_num_     = 0;
+    int medusa_top_k_        = 10;
+
+    int* medusa_input_tokens_buf_{};
+    int* medusa_output_tokens_buf_{};
+    int* medusa_each_path_len_buf_{};
+
+    std::unique_ptr<MedusaUtil> medusa_util_;
+    int*                        d_medusa_ti_{};
+    int*                        d_medusa_mask_{};
+    int*                        d_enable_medusa_{};
 };
 
 }  // namespace turbomind

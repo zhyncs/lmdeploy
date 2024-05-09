@@ -32,12 +32,15 @@
 #include "src/turbomind/models/llama/llama_params.h"
 #include "src/turbomind/models/llama/llama_utils.h"
 #include "src/turbomind/models/llama/unified_decoder.h"
+#include "src/turbomind/models/medusa_plugin/medusa_head.h"
 #include "src/turbomind/utils/Tensor.h"
 #include "src/turbomind/utils/cuda_utils.h"
 #include "src/turbomind/utils/logger.h"
 #include <functional>
 #include <memory>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
 namespace turbomind {
 
@@ -64,7 +67,9 @@ LlamaV2<T>::LlamaV2(size_t                       head_num,
                     cublasMMWrapper*             cublas_wrapper,
                     IAllocator*                  allocator,
                     bool                         is_free_buffer_after_forward,
-                    cudaDeviceProp*              cuda_device_prop):
+                    cudaDeviceProp*              cuda_device_prop,
+                    int                          medusa_num_heads,
+                    int                          medusa_num_layers):
     head_num_(head_num),
     size_per_head_(size_per_head),
     inter_size_(inter_size),
@@ -87,8 +92,10 @@ LlamaV2<T>::LlamaV2(size_t                       head_num,
     cuda_device_prop_(cuda_device_prop),
     debug_(isDebug()),
     lora_params_(lora_params),
-    shared_state_(shared_state)
-
+    shared_state_(shared_state),
+    medusa_num_heads_(medusa_num_heads),
+    medusa_num_layers_(medusa_num_layers),
+    cache_block_seq_len_(cache_block_seq_len)
 {
     TM_LOG_DEBUG(__PRETTY_FUNCTION__);
     TM_LOG_INFO("NCCL group_id = %d", tensor_para_.group_id_);
@@ -96,7 +103,7 @@ LlamaV2<T>::LlamaV2(size_t                       head_num,
     vocab_size_padded_ =
         (vocab_size_padded_ + tensor_para_.world_size_ - 1) / tensor_para_.world_size_ * tensor_para_.world_size_;
 
-    batch_ = std::make_unique<LlamaBatch<T>>(engine_params, cache_block_seq_len, quant_policy, this);
+    batch_ = std::make_unique<LlamaBatch<T>>(engine_params, cache_block_seq_len, quant_policy, this, medusa_num_heads_);
 
     initialize(attn_params, kv_head_num, use_context_fmha, cache_block_seq_len, quant_policy);
 
@@ -104,6 +111,11 @@ LlamaV2<T>::LlamaV2(size_t                       head_num,
 
     /// TODO: decouple Llama model and batch inference
     batch_->Start();
+
+    if (medusa_num_heads_ != 0) {
+        medusa_head_ = std::make_unique<MedusaHead<T>>(
+            hidden_units_, vocab_size_, medusa_num_heads_, stream_, cublas_wrapper_, allocator_, tensor_para_, false);
+    }
 }
 
 template<typename T>
@@ -111,6 +123,7 @@ LlamaV2<T>::~LlamaV2()
 {
     unified_decoder_.reset();
     delete dynamic_decode_layer_;
+    delete medusa_dynamic_decode_layer_;
 }
 
 template<typename T>
@@ -147,6 +160,15 @@ void LlamaV2<T>::initialize(const LlamaAttentionParams& attn_params,
                                                           allocator_,
                                                           is_free_buffer_after_forward_,
                                                           cuda_device_prop_);
+
+    medusa_dynamic_decode_layer_ = new DynamicDecodeLayer<float>(vocab_size_,
+                                                                 vocab_size_padded_,
+                                                                 0,
+                                                                 stream_,
+                                                                 cublas_wrapper_,
+                                                                 allocator_,
+                                                                 is_free_buffer_after_forward_,
+                                                                 cuda_device_prop_);
 }
 
 template<typename T>
@@ -242,7 +264,11 @@ void LlamaV2<T>::forwardUnified(T*               out,
                                 int              dc_batch_size,
                                 int              pf_batch_size,
                                 int*             lora_mask,
-                                const Sequence** sequences)
+                                const Sequence** sequences,
+                                const int*       medusa_ti,
+                                const int*       medusa_mask,
+                                const int*       enable_medusa,
+                                const int        medusa_input_len)
 {
     TM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
@@ -272,15 +298,21 @@ void LlamaV2<T>::forwardUnified(T*               out,
     const auto   dtype = getTensorType<T>();
     const size_t bsz   = dc_batch_size + pf_batch_size;
 
-    TensorMap inputs{{"decoder_input", {MEMORY_GPU, dtype, {token_num, hidden_units_}, decoder_input}},
-                     {"output_norm_weight", {MEMORY_GPU, dtype, {hidden_units_}, weights_->output_norm_weight}},
-                     {"h_q_len", {MEMORY_CPU, TYPE_INT32, {bsz}, h_input_length}},
-                     {"h_k_len", {MEMORY_CPU, TYPE_INT32, {bsz}, h_context_length}},
-                     {"finished", {MEMORY_GPU, TYPE_BOOL, {bsz}, finished}},
-                     {"dc_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &dc_batch_size}},
-                     {"pf_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &pf_batch_size}},
-                     {"rope_theta", {MEMORY_GPU, TYPE_FP32, {hidden_units_}, rope_theta}},
-                     {"cu_block_counts", {MEMORY_GPU, TYPE_INT32, {bsz}, cu_block_cnts}}};
+    TensorMap inputs{
+        {"decoder_input", {MEMORY_GPU, dtype, {token_num, hidden_units_}, decoder_input}},
+        {"output_norm_weight", {MEMORY_GPU, dtype, {hidden_units_}, weights_->output_norm_weight}},
+        {"h_q_len", {MEMORY_CPU, TYPE_INT32, {bsz}, h_input_length}},
+        {"h_k_len", {MEMORY_CPU, TYPE_INT32, {bsz}, h_context_length}},
+        {"finished", {MEMORY_GPU, TYPE_BOOL, {bsz}, finished}},
+        {"dc_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &dc_batch_size}},
+        {"pf_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &pf_batch_size}},
+        {"rope_theta", {MEMORY_GPU, TYPE_FP32, {hidden_units_}, rope_theta}},
+        {"cu_block_counts", {MEMORY_GPU, TYPE_INT32, {bsz}, cu_block_cnts}},
+        {"medusa_ti", {MEMORY_GPU, TYPE_INT32, {(size_t)medusa_input_len}, medusa_ti}},
+        {"medusa_mask", {MEMORY_GPU, TYPE_INT32, {(size_t)(medusa_input_len * medusa_input_len)}, medusa_mask}},
+        {"medusa_input_len", {MEMORY_CPU, TYPE_INT32, {1}, &medusa_input_len}},
+        {"enable_medusa", {MEMORY_GPU, TYPE_INT32, {bsz}, enable_medusa}},
+    };
 
     TensorMap outputs{{"decoder_output", {MEMORY_GPU, dtype, {token_num, hidden_units_}, decoder_output}},
                       {"block_ptrs", {MEMORY_GPU, TYPE_UINT64, {bsz}, block_ptrs}},
@@ -387,8 +419,7 @@ void LlamaV2<T>::dynamicDecode(int*            token_ids,
         {"input_lengths", {MEMORY_GPU, TYPE_INT32, {batch_size, 1}, context_length}},
         {"ite", {MEMORY_CPU, TYPE_UINT32, {1}, &ite}},
         {"end_id", {MEMORY_GPU, TYPE_INT32, {batch_size}, end_ids}},
-        {"local_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &local_batch_size}},
-    };
+        {"local_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &local_batch_size}}};
 
     const std::vector<std::string> optional_inputs{"stop_words_list",
                                                    "bad_words_list",
@@ -419,6 +450,35 @@ void LlamaV2<T>::dynamicDecode(int*            token_ids,
     }
 
     dynamic_decode_layer_->forward(&dynamic_decode_output_tensors, &dynamic_decode_input_tensors);
+}
+
+template<typename T>
+void LlamaV2<T>::dynamicDecode(
+    const size_t batch_size, const float* logits, curandState_t* curand_state, int* end_ids, int* output_ids)
+{
+    const int ite              = 0;
+    const int step             = 0;
+    const int max_input_length = 0;
+
+    std::unordered_map<std::string, Tensor> dynamic_decode_input_tensors{
+        {"logits", {MEMORY_GPU, TYPE_FP32, {batch_size, (size_t)1, vocab_size_padded_}, logits}},
+        {"step", {MEMORY_CPU, TYPE_INT32, {1}, &step}},
+        {"max_input_length", {MEMORY_CPU, TYPE_INT32, {1}, &max_input_length}},
+        {"ite", {MEMORY_CPU, TYPE_UINT32, {1}, &ite}},
+        {"end_id", {MEMORY_GPU, TYPE_INT32, {batch_size}, end_ids}},
+        {"local_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &batch_size}},
+    };
+
+    std::unordered_map<std::string, Tensor> dynamic_decode_output_tensors{
+        {"output_ids", {MEMORY_GPU, TYPE_INT32, {1U, batch_size, 1U}, output_ids}},
+        {"finished", {MEMORY_GPU, TYPE_BOOL, {batch_size}, nullptr}},
+        {"sequence_length", {MEMORY_GPU, TYPE_INT32, {batch_size}, nullptr}},
+        {"curand_state", {MEMORY_GPU, TYPE_VOID, {batch_size}, curand_state}},
+    };
+
+    TensorMap runtime_args;
+    medusa_dynamic_decode_layer_->setup(batch_size, 1, &runtime_args);
+    medusa_dynamic_decode_layer_->forward(&dynamic_decode_output_tensors, &dynamic_decode_input_tensors);
 }
 
 static inline Tensor slice(const Tensor& tensor, int index)
@@ -535,6 +595,24 @@ void LlamaV2<T>::forward(std::unordered_map<std::string, Tensor>*       outputs,
         }
         throw std::runtime_error(ss.str());
     }
+}
+
+template<typename T>
+void LlamaV2<T>::medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size, const int top_k)
+{
+    turbomind::DataType dtype = turbomind::getTensorType<T>();
+
+    turbomind::TensorMap inputs{
+        {"medusa_head_input", {turbomind::MEMORY_GPU, dtype, {batch_size, hidden_units_}, input_buf}},
+        {"top_k", {turbomind::MEMORY_CPU, TYPE_INT32, {1}, &top_k}},
+    };
+
+    turbomind::TensorMap outputs{
+        {"medusa_head_output",
+         {turbomind::MEMORY_GPU, dtype, {batch_size, (size_t)medusa_num_heads_, (size_t)top_k}, topk_output_ids}},
+    };
+
+    medusa_head_->forward(&outputs, &inputs, weights_->get_medusa_weight());
 }
 
 template class LlamaV2<half>;

@@ -27,7 +27,9 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**       blocks,
                                                     int64_t      stride_h,
                                                     int64_t      stride_s,
                                                     int          layer_id,
-                                                    BlockLayout  block_layout)
+                                                    BlockLayout  block_layout,
+                                                    int*         enable_medusa,
+                                                    int*         medusa_ti)
 {
 
     constexpr int kVecSize = sizeof(uint4) / sizeof(T);
@@ -127,7 +129,10 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**       blocks,
                           std::integral_constant<int, kVecSize>{});
             PRAGMA_UNROLL
             for (int s = 0; s < ITER_S; ++s) {
-                const int ti = history_len + offset.y + s * Map::kDeltaS + token_idx;  // sequence local
+                int ti = history_len + offset.y + s * Map::kDeltaS + token_idx;  // sequence local
+                if (enable_medusa && enable_medusa[batch_idx] && medusa_ti) {
+                    ti = history_len + medusa_ti[(offset.y + s * Map::kDeltaS) + token_idx];
+                }
                 rope.apply(vec_K[s][c], ti);
             }
         }
@@ -207,6 +212,8 @@ void invokeProcessKV_v2(char**       blocks,
                         int          head_dim,
                         int          batch_size,
                         int          quant_policy,
+                        int*         enable_medusa,
+                        int*         medusa_ti,
                         cudaStream_t stream)
 {
     constexpr int WARPS = 4;
@@ -238,7 +245,9 @@ void invokeProcessKV_v2(char**       blocks,
                                                                               stride_h,
                                                                               stride_s,
                                                                               layer_id,
-                                                                              block_layout);
+                                                                              block_layout,
+                                                                              enable_medusa,
+                                                                              medusa_ti);
     };
 
     if (quant_policy & QuantPolicy::kCacheKVInt8) {
@@ -274,6 +283,8 @@ void invokeProcessKV_v2(char**       blocks,
                                      int          head_dim,                                                            \
                                      int          batch_size,                                                          \
                                      int          quant_policy,                                                        \
+                                     int*         enable_medusa,                                                       \
+                                     int*         medusa_ti,                                                           \
                                      cudaStream_t stream);
 
 INSTANTIATE_invokeProcessKV_v2(half);
@@ -294,7 +305,9 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*           k,
                                                     int64_t      stride_h,
                                                     int64_t      stride_s,
                                                     int          layer_id,
-                                                    BlockLayout  block_layout)
+                                                    BlockLayout  block_layout,
+                                                    int*         enable_medusa,
+                                                    int*         medusa_ti)
 {
     constexpr int kVecSize = sizeof(uint4) / sizeof(T);
 
@@ -380,7 +393,10 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*           k,
                           std::integral_constant<int, kVecSize>{});
             PRAGMA_UNROLL
             for (int s = 0; s < ITER_S; ++s) {
-                const int ti = offset.y + s * Map::kDeltaS + token_idx;  // sequence local
+                int ti = offset.y + s * Map::kDeltaS + token_idx;  // sequence local
+                if (enable_medusa && enable_medusa[batch_idx] && medusa_ti) {
+                    ti = medusa_ti[(offset.y + s * Map::kDeltaS) + token_idx];
+                }
                 rope.apply(out_K[s][c], ti);
             }
         }
@@ -421,6 +437,8 @@ void invokeFlattenKV_v2(T*           k,
                         int          head_dim,
                         int          batch_size,
                         int          quant_policy,
+                        int*         enable_medusa,
+                        int*         medusa_ti,
                         cudaStream_t stream)
 {
     constexpr int kWarpCnt = 4;
@@ -449,7 +467,9 @@ void invokeFlattenKV_v2(T*           k,
                                                                             stride_h,
                                                                             stride_s,
                                                                             layer_id,
-                                                                            block_layout);
+                                                                            block_layout,
+                                                                            enable_medusa,
+                                                                            medusa_ti);
     };
 
     if (quant_policy & QuantPolicy::kCacheKVInt8) {
@@ -482,6 +502,8 @@ void invokeFlattenKV_v2(T*           k,
                                      int          head_dim,                                                            \
                                      int          batch_size,                                                          \
                                      int          quant_policy,                                                        \
+                                     int*         enable_medusa,                                                       \
+                                     int*         medusa_ti,                                                           \
                                      cudaStream_t stream);
 
 INSTANTIATE_invokeFlattenKV_v2(half);

@@ -3,6 +3,7 @@
 #include "src/turbomind/models/llama/LlamaBatch.h"
 #include "src/turbomind/kernels/attention/data_type.h"
 #include "src/turbomind/kernels/decoding_kernels.h"
+#include "src/turbomind/kernels/gpt_kernels.h"
 #include "src/turbomind/kernels/sampling_topk_kernels.h"
 #include "src/turbomind/macro.h"
 #include "src/turbomind/models/llama/BlockManager.h"
@@ -247,6 +248,7 @@ void LlamaBatch<T>::ProcessInferRequests(const Requests& requests)
         FT_CHECK(state.sequences[idx]);
 
         auto& seq = *state.sequences[idx];
+        seq.iter  = 0;
 
         if (int step = r->inputs[rank_].getVal<int>("step", -1); step >= 0) {
             if (step <= seq.tokens.size()) {
@@ -267,6 +269,8 @@ void LlamaBatch<T>::ProcessInferRequests(const Requests& requests)
         const auto output_ids_base = state.output_ids + session_len_ * idx;
         auto       output_ids      = output_ids_base;
 
+        auto incoming_input_ids = state.input_ids + session_len_ * idx;
+
         // copy history tokens
         if (!seq.tokens.empty()) {
             output_ids = Copy(seq.tokens.data(), seq.tokens.size(), output_ids);
@@ -275,6 +279,8 @@ void LlamaBatch<T>::ProcessInferRequests(const Requests& requests)
         // copy input tokens
         if (input_length) {
             output_ids = Copy(input_ids, input_length, output_ids);
+
+            Copy(input_ids, input_length, incoming_input_ids);
         }
 
         // copy input tokens to prompt for prefix matching
@@ -604,7 +610,17 @@ void LlamaBatch<T>::Initialize(GenerationState& g)
         }
     }
 
-    const int max_context_len = *std::max_element(state_->h_context_length, state_->h_context_length + batch_size);
+    for (int i = 0; i < batch_size; i++) {
+        if (state_->sequences[i]->iter == 0) {
+            h_medusa_sequences_length_[i] = state_->h_context_length[i];
+        }
+        else {
+            // update to avoid some requests removed from slot, leading to wrong info.
+            h_medusa_sequences_length_[i] = state_->sequences[i]->cache_len + 1;
+        }
+    }
+
+    int medusa_max_context_len = *std::max_element(h_medusa_sequences_length_, h_medusa_sequences_length_ + batch_size);
 
     std::vector<uint64_t> unique_ids(batch_size);
     for (int i = 0; i < batch_size; ++i) {
@@ -625,10 +641,10 @@ void LlamaBatch<T>::Initialize(GenerationState& g)
     g.partial_context_legnth = partial_len;
     g.unique_ids             = std::move(unique_ids);
     g.finished_count         = 0;
-
     if (!skip_init_sampling) {
-        g.max_init_ctx_len = max_context_len;
-        g.step             = max_context_len;
+        g.max_init_ctx_len = medusa_max_context_len;
+        g.step             = medusa_max_context_len;
+
         InitializeSampling(g);
     }
 }
@@ -680,7 +696,8 @@ void LlamaBatch<T>::CopyState(const std::vector<std::tuple<BatchState*, BatchSta
         IndexedCopy(s_idx,
                     d_idx,
                     std::tuple{s->output_ids, d->output_ids, session_len_},
-                    std::tuple{s->curand_state, d->curand_state, 1});
+                    std::tuple{s->curand_state, d->curand_state, 1},
+                    std::tuple{s->input_ids, d->input_ids, session_len_});
     }
 
     for (const auto& [s, d, si, di] : desc) {
@@ -752,6 +769,71 @@ void LlamaBatch<T>::AllocateBuffer(size_t batch_size, size_t session_len, int ca
 
     rope_theta_ = (float*)allocator_->reMalloc(rope_theta_, sizeof(float) * batch_size, false);
 
+    // medusa
+    medusa_inited_hidden_states_buf_ = (T*)allocator_->reMalloc(
+        medusa_inited_hidden_states_buf_, sizeof(T) * medusa_input_length_ * hidden_units * batchxbeam, true);
+    medusa_inited_input_ids_buf_ =
+        (int*)allocator_->reMalloc(medusa_inited_input_ids_buf_, sizeof(int) * medusa_input_length_ * batchxbeam, true);
+    medusa_all_hidden_states_buf_ = (T*)allocator_->reMalloc(
+        medusa_all_hidden_states_buf_, sizeof(T) * medusa_input_length_ * hidden_units * batchxbeam, true);
+    medusa_verified_hidden_states_buf_ =
+        (T*)allocator_->reMalloc(medusa_verified_hidden_states_buf_, sizeof(T) * hidden_units * batchxbeam, true);
+    medusa_token_ids_buf_ =
+        (int*)allocator_->reMalloc(medusa_token_ids_buf_, sizeof(int) * batchxbeam * session_len * 2, true);
+    medusa_max_match_length_buf_ =
+        (int*)allocator_->reMalloc(medusa_max_match_length_buf_, sizeof(int) * batchxbeam, true);
+    h_medusa_max_match_length_buf_ =
+        (int*)allocator_->reMalloc(h_medusa_max_match_length_buf_, sizeof(int) * batchxbeam, true, true);
+    medusa_max_match_idx_buf_ = (int*)allocator_->reMalloc(medusa_max_match_idx_buf_, sizeof(int) * batchxbeam, true);
+    h_medusa_max_match_idx_buf_ =
+        (int*)allocator_->reMalloc(h_medusa_max_match_idx_buf_, sizeof(int) * batchxbeam, true, true);
+    h_medusa_last_match_idx_buf_ =
+        (int*)allocator_->reMalloc(h_medusa_last_match_idx_buf_, sizeof(int) * batchxbeam, true, true);
+    h_pseudo_inputs_buf_ =
+        (int*)allocator_->reMalloc(h_pseudo_inputs_buf_, sizeof(int) * batchxbeam * medusa_input_length_, true, true);
+    h_medusa_preds_batched_buf_ = (int*)allocator_->reMalloc(
+        h_medusa_preds_batched_buf_, sizeof(int) * batchxbeam * medusa_num_heads_ * medusa_top_k_, true, true);
+    medusa_topk_output_ids_buf_ = (int*)allocator_->reMalloc(
+        medusa_topk_output_ids_buf_, sizeof(int) * medusa_num_heads_ * batchxbeam * medusa_top_k_, true);
+    medusa_verified_length_      = (int*)allocator_->reMalloc(medusa_verified_length_, sizeof(int) * batchxbeam, true);
+    medusa_verified_packed_path_ = (int*)allocator_->reMalloc(
+        medusa_verified_packed_path_, sizeof(int) * batchxbeam * (1 + medusa_num_heads_), true);
+    h_medusa_verified_packed_path_ = (int*)allocator_->reMalloc(
+        h_medusa_verified_packed_path_, sizeof(int) * batchxbeam * (1 + medusa_num_heads_), true, true);
+    last_input_ids_buf_ =
+        (int*)allocator_->reMalloc(last_input_ids_buf_, sizeof(int) * batchxbeam * session_len_, true);
+    medusa_input_tokens_buf_ = (int*)allocator_->reMalloc(
+        medusa_input_tokens_buf_, sizeof(int) * batchxbeam * medusa_path_num_ * (1 + medusa_num_heads_), true);
+    medusa_output_tokens_buf_ = (int*)allocator_->reMalloc(
+        medusa_output_tokens_buf_, sizeof(int) * batchxbeam * medusa_path_num_ * (1 + medusa_num_heads_), true);
+    medusa_each_path_len_buf_ =
+        (int*)allocator_->reMalloc(medusa_each_path_len_buf_, sizeof(int) * medusa_path_num_, true);
+    d_medusa_ti_ = (int*)allocator_->reMalloc(d_medusa_ti_, sizeof(int) * medusa_input_length_, true);
+    d_medusa_mask_ =
+        (int*)allocator_->reMalloc(d_medusa_mask_, sizeof(int) * medusa_input_length_ * medusa_input_length_, true);
+    d_enable_medusa_ = (int*)allocator_->reMalloc(d_enable_medusa_, sizeof(int) * batch_size, true);
+
+    h_medusa_cache_len_ = (int*)allocator_->reMalloc(h_medusa_cache_len_, sizeof(int) * batchxbeam, true, true);
+    h_medusa_sequences_length_ =
+        (int*)allocator_->reMalloc(h_medusa_sequences_length_, sizeof(int) * batchxbeam, true, true);
+    h_medusa_verified_length_ =
+        (int*)allocator_->reMalloc(h_medusa_verified_length_, sizeof(int) * batchxbeam, true, true);
+
+    medusa_context_length_begin_ =
+        (int*)allocator_->reMalloc(medusa_context_length_begin_, sizeof(int) * batchxbeam, true);
+
+    if (medusa_logits_buf_ == nullptr) {
+        NcclGuard guard(model_->tensor_para_, stream_, true);
+        medusa_logits_buf_ = (float*)allocator_->malloc(sizeof(float) * model_->vocab_size_padded_ * max_batch_size_
+                                                        * medusa_input_length_);
+        const auto tp      = model_->tensor_para_.world_size_;
+        if (tp > 1) {
+            FT_CHECK(model_->vocab_size_padded_ % tp == 0);
+            medusa_local_logits_buf_ = (float*)allocator_->malloc(sizeof(float) * model_->vocab_size_padded_
+                                                                  * max_batch_size_ * medusa_input_length_);
+        }
+    }
+
     is_allocate_buffer_ = true;
 }
 
@@ -799,6 +881,7 @@ void LlamaBatch<T>::AllocatePersistantBuffer(size_t max_batch_size, int cache_bl
 
     for (auto& s : states_) {
         s.output_ids = (int*)allocator_->reMalloc(s.output_ids, sizeof(int) * max_batch_size * session_len_, true);
+        s.input_ids  = (int*)allocator_->reMalloc(s.input_ids, sizeof(int) * max_batch_size * session_len_, true);
         s.curand_state =
             (curandState_t*)allocator_->reMalloc(s.curand_state, sizeof(curandState_t) * max_batch_size, true);
     }
@@ -890,6 +973,51 @@ void LlamaBatch<T>::FreeBuffer()
         allocator_->free((void**)&sampled_indexes_);
         allocator_->free((void**)&sampled_nums_);
 
+        allocator_->free((void**)&h_medusa_verified_length_, true);
+        allocator_->free((void**)&h_medusa_cache_len_, true);
+        allocator_->free((void**)&h_medusa_sequences_length_, true);
+
+        allocator_->free((void**)&medusa_inited_hidden_states_buf_);
+        allocator_->free((void**)&medusa_inited_input_ids_buf_);
+
+        allocator_->free((void**)&medusa_all_hidden_states_buf_);
+
+        if (medusa_logits_buf_) {
+            allocator_->free((void**)&medusa_logits_buf_);
+        }
+        if (medusa_local_logits_buf_) {
+            allocator_->free((void**)&medusa_local_logits_buf_);
+        }
+
+        allocator_->free((void**)&medusa_token_ids_buf_);
+
+        allocator_->free((void**)&medusa_max_match_length_buf_);
+        allocator_->free((void**)&medusa_max_match_idx_buf_);
+        allocator_->free((void**)&h_medusa_max_match_length_buf_, true);
+        allocator_->free((void**)&h_medusa_max_match_idx_buf_, true);
+        allocator_->free((void**)&h_medusa_last_match_idx_buf_, true);
+        allocator_->free((void**)&h_pseudo_inputs_buf_, true);
+        allocator_->free((void**)&h_medusa_preds_batched_buf_, true);
+
+        allocator_->free((void**)&medusa_topk_output_ids_buf_);
+
+        allocator_->free((void**)&medusa_verified_length_);
+        allocator_->free((void**)&medusa_verified_packed_path_);
+        allocator_->free((void**)&h_medusa_verified_packed_path_, true);
+
+        allocator_->free((void**)&last_input_ids_buf_);
+
+        allocator_->free((void**)&medusa_input_tokens_buf_);
+        allocator_->free((void**)&medusa_output_tokens_buf_);
+        allocator_->free((void**)&medusa_each_path_len_buf_);
+
+        allocator_->free((void**)&d_medusa_ti_);
+        allocator_->free((void**)&d_medusa_mask_);
+        allocator_->free((void**)&d_enable_medusa_);
+
+        allocator_->free((void**)&medusa_context_length_begin_);
+        allocator_->free((void**)&medusa_verified_hidden_states_buf_);
+
         is_allocate_buffer_ = false;
     }
 
@@ -909,6 +1037,7 @@ void LlamaBatch<T>::FreeBuffer()
             allocator_->free((void**)&s.h_finished, true);
             allocator_->free((void**)&s.h_rope_theta, true);
             allocator_->free((void**)&s.output_ids);
+            allocator_->free((void**)&s.input_ids);
             allocator_->free((void**)&s.curand_state);
         }
         allocator_->free((void**)&h_cu_block_counts_, true);
@@ -928,7 +1057,8 @@ void LlamaBatch<T>::FreeBuffer()
 }
 
 template<typename T>
-LlamaBatch<T>::LlamaBatch(const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model):
+LlamaBatch<T>::LlamaBatch(
+    const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model, int medusa_num_heads):
     max_batch_size_(params.max_batch_size),
     max_context_token_num_(params.max_context_token_num),
     session_len_(params.session_len),
@@ -939,7 +1069,9 @@ LlamaBatch<T>::LlamaBatch(const EngineParams& params, int cache_block_seq_len, i
     data_type_(getTensorType<T>()),
     num_tokens_per_iter_(params.num_tokens_per_iter),
     extra_tokens_per_iter_(params.extra_tokens_per_iter),
-    max_prefill_iters_(params.max_prefill_iters)
+    max_prefill_iters_(params.max_prefill_iters),
+    medusa_num_heads_(medusa_num_heads),
+    medusa_enable_(medusa_num_heads != 0)
 {
     stream_         = model_->stream_;
     allocator_      = model_->allocator_;
@@ -990,6 +1122,12 @@ LlamaBatch<T>::LlamaBatch(const EngineParams& params, int cache_block_seq_len, i
     back_     = &states_[1];
     incoming_ = &states_[2];
 
+    std::string medusa_choice_path = params.medusa_choice_path;
+    std::string medusa_choice_name = params.medusa_choice_name;
+    medusa_util_                   = std::make_unique<MedusaUtil>(medusa_choice_path, medusa_choice_name);
+    medusa_input_length_           = medusa_util_->get_input_len();
+    medusa_path_num_               = medusa_util_->get_path_num();
+
     AllocateBuffer(max_batch_size_, session_len_, cache_block_seq_len);
     AllocatePersistantBuffer(max_batch_size_, cache_block_seq_len);
 }
@@ -1004,9 +1142,7 @@ void LlamaBatch<T>::InitializeSampling(const GenerationState& g)
     }
 
     // Context length at initialization, will stay constant until re-initialziation
-    Copy(context_length_buf_, batch_size, init_context_length_);
-
-    Copy(context_length_buf_, batch_size, sequence_lengths_);
+    Copy(h_medusa_sequences_length_, batch_size, init_context_length_);
     // `sequence_lengths_` will be increased by dynamic decode
     // note that in decoder and in output "sequence length" has different semantic
     // - in decoder it means length of sequence that has kv cache already computed
@@ -1029,7 +1165,7 @@ void LlamaBatch<T>::InitializeSampling(const GenerationState& g)
 
     // seq_limit_len_, will be compared to `step` instead of `sequence_length`, so padding len should be accounted for
     for (int i = 0; i < batch_size; ++i) {
-        h_seq_limit_len_[i] = state_->seq_len_limit[i] + (g.max_init_ctx_len - state_->h_context_length[i]);
+        h_seq_limit_len_[i] = state_->seq_len_limit[i] + (g.max_init_ctx_len - h_medusa_sequences_length_[i]);
     }
     Copy(h_seq_limit_len_, batch_size, seq_limit_len_);
 
@@ -1212,20 +1348,69 @@ auto LlamaBatch<T>::Finish(GenerationState& g) -> std::vector<Signal>
         FT_CHECK(g.step >= 0);
 
         // [s,b] -> [b,s] and skip padding in [context_len, max_context_len)
-        invokeGatherOutput(state_->output_ids,
-                           token_ids_buf_,
-                           init_context_length_,
-                           g.max_init_ctx_len,
-                           g.step,
-                           session_len_,
-                           batch_size - g.partial,
-                           stream_);
+        if (medusa_enable_) {
+            invokeTransposeAxis01(
+                last_input_ids_buf_, state_->input_ids, batch_size - g.partial, session_len_, 1, stream_);
+
+            std::vector<int> max_context_len_vec(batch_size, 0);
+            Copy(init_context_length_, batch_size, max_context_len_vec.data());
+            check_cuda_error(cudaStreamSynchronize(stream_));
+            int max_context_len = *std::max_element(max_context_len_vec.begin(), max_context_len_vec.end());
+            invokeGatherOutput(state_->output_ids,
+                               state_->input_ids,
+                               token_ids_buf_,
+                               last_input_ids_buf_,
+                               medusa_verified_length_,
+                               init_context_length_,
+                               medusa_verified_packed_path_,
+                               max_context_len,
+                               g.step + medusa_input_length_,
+                               session_len_,
+                               batch_size - g.partial,
+                               medusa_input_length_,
+                               medusa_num_heads_,
+                               stream_);
+            Copy(h_medusa_sequences_length_, batch_size, init_context_length_);
+
+            g.step = *std::max_element(h_medusa_sequences_length_, h_medusa_sequences_length_ + batch_size);
+
+            Clear(token_ids_buf_, batch_size * session_len_);
+            invokeTransposeAxis01(token_ids_buf_, state_->output_ids, batch_size, session_len_, 1, stream_);
+        }
+        else {
+            invokeGatherOutput(state_->output_ids,
+                               state_->input_ids,
+                               token_ids_buf_,
+                               nullptr,
+                               nullptr,
+                               init_context_length_,
+                               nullptr,
+                               g.max_init_ctx_len,
+                               g.step,
+                               session_len_,
+                               batch_size - g.partial,
+                               1,
+                               0,
+                               stream_);
+        }
         sync_check_cuda_error();
     }
 
+    invokeCompactKVCache<T>(block_ptrs_,
+                            medusa_context_length_begin_,  // is input length: [last verfied + last generate]
+                            medusa_verified_packed_path_,
+                            medusa_verified_length_,
+                            cu_block_counts_,
+                            model_->num_layer_,
+                            model_->local_kv_head_num_,
+                            model_->cache_block_seq_len_,
+                            model_->size_per_head_,
+                            medusa_input_length_,
+                            medusa_num_heads_,
+                            batch_size,
+                            stream_);
     Copy(state_->output_ids, batch_size * session_len_, h_output_ids_);
-    Copy(finished_buf_, batch_size, state_->h_finished);
-    Copy(sequence_lengths_, batch_size, state_->h_context_length);
+    Copy(h_medusa_cache_len_, batch_size, state_->h_context_length);
 
     Copy(sampled_logprobs_, batch_size * kMaxLogProb, h_sampled_logprobs_);
     Copy(sampled_indexes_, batch_size * kMaxLogProb, h_sampled_indexes_);
@@ -1237,6 +1422,15 @@ auto LlamaBatch<T>::Finish(GenerationState& g) -> std::vector<Signal>
     // generated) tokens
     for (int i = 0; i < batch_size; ++i) {
         ++state_->h_context_length[i];
+    }
+    for (int i = 0; i < batch_size; i++) {
+        if ((state_->h_context_length[i]) >= state_->seq_len_limit[i]) {
+            state_->h_finished[i]       = true;
+            state_->h_context_length[i] = state_->seq_len_limit[i];
+        }
+        else {
+            state_->h_finished[i] = false;
+        }
     }
 
     {  // output logprobs, should be set before sequence_length
@@ -1320,6 +1514,10 @@ auto LlamaBatch<T>::Finish(GenerationState& g) -> std::vector<Signal>
             // synchronize for interrupted sequences
             check_cuda_error(cudaStreamSynchronize(stream_));
         }
+    }
+
+    for (int i = 0; i < batch_size - g.partial; i++) {
+        state_->h_context_length[i] += medusa_input_length_ - 1;
     }
 
     if (g.partial) {
@@ -1541,7 +1739,7 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
             // const int   missing    = state_->h_context_length[i] - seq.cache_len;
             FT_CHECK(seq.input_length >= 1);
             h_input_length_buf_[i] = seq.input_length;
-            input_d_ptrs[i]        = state_->output_ids + i * session_len_ + seq.cache_len;
+            input_d_ptrs[i]        = state_->input_ids + i * session_len_;
             if (seq.input_length > 1 && pf_offset < 0) {
                 pf_offset = i;
             }
@@ -1556,6 +1754,10 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
             input_d_ptrs[i]        = state_->output_ids + i * session_len_ + state_->h_context_length[i] - 1;
         }
         pf_offset = active_size;
+    }
+
+    if (medusa_enable_) {
+        pf_offset = 0;
     }
 
     // These buffers are only accessed when there are prefill workloads
@@ -1586,6 +1788,8 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
         }
     }
     offsets.push_back(active_size);
+
+    int inited_count = 0;
 
     // forward on mini-batches
     for (int p = 0; p < (int)offsets.size() - 1; ++p) {
@@ -1629,12 +1833,42 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
             }
         }
 
-        model_->forwardUnified(decoder_output_buf_ + first * model_->hidden_units_,
-                               context_decoder_output_buf_,  // temp
-                               context_decoder_input_buf_,   // temp
+        int* medusa_ti   = nullptr;
+        int* medusa_mask = nullptr;
+        // this should set by inited/first.
+        std::unique_ptr<int[]> enable_medusa = nullptr;
+        int                    medusa_input_len;
+
+        int* medusa_ti_ptr   = medusa_ti;
+        int* medusa_mask_ptr = medusa_mask;
+
+        enable_medusa          = std::make_unique<int[]>(mini_batch_size);
+        int* enable_medusa_ptr = enable_medusa.get();
+
+        medusa_util_->get_medusa_ti(&medusa_ti_ptr);
+        medusa_util_->get_medusa_mask(&medusa_mask_ptr);
+        medusa_input_len = medusa_util_->get_input_len();
+
+        for (int batch_id = 0; batch_id < mini_batch_size; batch_id++) {
+            // not first inited
+            if (sequences[batch_id]->iter != 0) {
+                enable_medusa_ptr[batch_id] = 1;
+            }
+        }
+
+        // to Device
+        Copy(medusa_ti_ptr, medusa_input_len, d_medusa_ti_);
+        Copy(medusa_mask_ptr, medusa_input_len * medusa_input_len, d_medusa_mask_);
+        Copy(enable_medusa_ptr, mini_batch_size, d_enable_medusa_);
+        Copy(state_->h_context_length + first, mini_batch_size, medusa_context_length_begin_ + first);
+        check_cuda_error(cudaStreamSynchronize(stream_));
+
+        model_->forwardUnified(decoder_output_buf_ + first * model_->hidden_units_,  // out
+                               context_decoder_output_buf_,                          // temp
+                               context_decoder_input_buf_,                           // temp
                                (void**)block_ptrs_,
                                cu_block_counts_ + first,
-                               context_decoder_ids_buf_,  // temp
+                               context_decoder_ids_buf_,  // temp input_ids
                                h_input_length_buf_ + first,
                                state_->h_context_length + first,
                                rope_theta_ + first,
@@ -1643,7 +1877,28 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
                                dc_batch_size,
                                pf_batch_size,
                                lora_mask_buf_,
-                               sequences.data());
+                               sequences.data(),
+                               d_medusa_ti_,
+                               d_medusa_mask_,
+                               d_enable_medusa_,  // according to init/first
+                               medusa_input_len);
+
+        if (medusa_enable_) {
+            MedusaCopy(mini_batch_size,
+                       first,
+                       model_->hidden_units_,
+                       medusa_input_length_,
+                       active_size,
+                       g.partial,
+                       context_decoder_output_buf_,
+                       context_decoder_ids_buf_,
+                       decoder_output_buf_,
+                       h_input_length_buf_,
+                       inited_count,
+                       medusa_all_hidden_states_buf_,
+                       medusa_inited_hidden_states_buf_,
+                       medusa_inited_input_ids_buf_);
+        }
 
         if (iter == 0) {
             // compute logits of inputs if requested
@@ -1653,12 +1908,81 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
 
     std::fill(h_input_length_buf_, h_input_length_buf_ + active_size, 0);
 
+    bool medusa_should_stop{};
+    if (medusa_enable_) {
+        MedusaVerify(inited_count,
+                     active_size - g.partial,
+                     max_batch_size_,
+                     medusa_input_length_,
+                     model_->hidden_units_,
+                     medusa_num_heads_,
+                     medusa_path_num_,
+                     medusa_inited_hidden_states_buf_,
+                     medusa_inited_input_ids_buf_,
+                     medusa_logits_buf_,
+                     medusa_local_logits_buf_,
+                     medusa_token_ids_buf_,
+                     medusa_input_tokens_buf_,
+                     medusa_output_tokens_buf_,
+                     medusa_each_path_len_buf_,
+                     medusa_max_match_length_buf_,
+                     medusa_max_match_idx_buf_,
+                     medusa_verified_length_,
+                     medusa_verified_packed_path_,
+                     h_medusa_max_match_length_buf_,
+                     h_medusa_max_match_idx_buf_,
+                     h_medusa_verified_length_,
+                     h_medusa_verified_packed_path_,
+                     h_medusa_last_match_idx_buf_,
+                     state_->curand_state,
+                     d_end_ids_buf_);
+        MedusaGenerate(g.step,
+                       active_size - g.partial,
+                       model_->hidden_units_,
+                       medusa_input_length_,
+                       medusa_num_heads_,
+                       medusa_top_k_,
+                       medusa_all_hidden_states_buf_,
+                       h_medusa_last_match_idx_buf_,
+                       h_medusa_max_match_length_buf_,
+                       h_medusa_max_match_idx_buf_,
+                       medusa_should_stop,
+                       medusa_verified_hidden_states_buf_,
+                       medusa_logits_buf_,
+                       medusa_local_logits_buf_,
+                       medusa_topk_output_ids_buf_,
+                       medusa_token_ids_buf_,
+                       token_ids_buf_,
+                       h_medusa_preds_batched_buf_,
+                       h_pseudo_inputs_buf_,
+                       state_->curand_state,
+                       d_end_ids_buf_);
+    }
+
     // `SequenceManager` needs real-time value of cache length
-    for (int i = 0; i < active_size; ++i) {
+    for (int i = 0; i < active_size - g.partial; ++i) {
         if (state_->requests[i]) {
             FT_CHECK(state_->sequences[i]);
-            state_->sequences[i]->cache_len += state_->sequences[i]->input_length;
+            if (state_->sequences[i]->iter == 0) {
+                state_->sequences[i]->cache_len += state_->sequences[i]->input_length;
+            }
+            else {
+                state_->sequences[i]->cache_len += 1 + h_medusa_verified_length_[i];  // input_len
+            }
+
+            h_medusa_cache_len_[i]        = state_->sequences[i]->cache_len;
+            h_medusa_sequences_length_[i] = state_->sequences[i]->cache_len + 1;
+            state_->sequences[i]->iter += 1;
         }
+    }
+
+    if (g.partial) {
+        int i = active_size - 1;
+        state_->sequences[i]->cache_len += state_->sequences[i]->input_length;
+    }
+
+    if (medusa_enable_) {
+        return !medusa_should_stop;
     }
 
     bool should_stop{};
@@ -1710,6 +2034,227 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
     // PrintDecodeTokens(token_ids_buf_, g.step, active_size, stream_, "Forward");
 
     return !should_stop;
+}
+
+template<typename T>
+void LlamaBatch<T>::MedusaCopy(const int  mini_batch_size,
+                               const int  first,
+                               const int  hidden_size,
+                               const int  medusa_input_length,
+                               const int  active_size,
+                               const int  partial,
+                               const T*   context_decoder_output_buf,
+                               const int* context_decoder_ids_buf,
+                               const T*   decoder_output_buf,
+                               const int* h_input_length_buf,
+                               int&       inited_count,
+                               T*         medusa_all_hidden_states_buf,
+                               T*         medusa_inited_hidden_states_buf,
+                               int*       medusa_inited_input_ids_buf)
+{
+    T*   context_decoder_output_src = const_cast<T*>(context_decoder_output_buf);
+    int* context_decoder_ids_src    = const_cast<int*>(context_decoder_ids_buf);
+
+    T* last_token_hidden_states = const_cast<T*>(decoder_output_buf) + first * hidden_size;
+
+    for (int j = 0; j < mini_batch_size; j++) {
+        int idx = first + j;
+        if (partial && idx == active_size - 1) {
+            continue;
+        }
+        int  len    = h_input_length_buf[idx];
+        bool inited = state_->sequences[idx]->iter != 0;
+
+        T* medusa_all_hidden_states_buf_dst = medusa_all_hidden_states_buf + idx * medusa_input_length * hidden_size;
+
+        if (inited) {
+            T* medusa_inited_hidden_states_buf_dst =
+                medusa_inited_hidden_states_buf + inited_count * medusa_input_length * hidden_size;
+            int* medusa_inited_input_ids_buf_dst = medusa_inited_input_ids_buf + inited_count * medusa_input_length;
+
+            Copy(context_decoder_output_src, len * hidden_size, medusa_inited_hidden_states_buf_dst);
+            Copy(context_decoder_ids_src, len, medusa_inited_input_ids_buf_dst);
+
+            Copy(context_decoder_output_src, len * hidden_size, medusa_all_hidden_states_buf_dst);
+
+            inited_count++;
+        }
+        else {
+            Copy(last_token_hidden_states, hidden_size, medusa_all_hidden_states_buf_dst);
+        }
+
+        context_decoder_output_src += len * hidden_size;
+        context_decoder_ids_src += len;
+        last_token_hidden_states += hidden_size;
+    }
+}
+
+template<typename T>
+void LlamaBatch<T>::MedusaVerify(const int      inited_count,
+                                 const int      batch_size,
+                                 const int      max_batch_size,
+                                 const int      medusa_input_length,
+                                 const int      hidden_size,
+                                 const int      medusa_num_heads,
+                                 const int      medusa_path_num,
+                                 const T*       medusa_inited_hidden_states_buf,
+                                 const int*     medusa_inited_input_ids_buf,
+                                 float*         medusa_logits_buf,
+                                 float*         medusa_local_logits_buf,
+                                 int*           medusa_token_ids_buf,
+                                 int*           medusa_input_tokens_buf,
+                                 int*           medusa_output_tokens_buf,
+                                 int*           medusa_each_path_len_buf,
+                                 int*           medusa_max_match_length_buf,
+                                 int*           medusa_max_match_idx_buf,
+                                 int*           medusa_verified_length,
+                                 int*           medusa_verified_packed_path,
+                                 int*           h_medusa_max_match_length_buf,
+                                 int*           h_medusa_max_match_idx_buf,
+                                 int*           h_medusa_verified_length,
+                                 int*           h_medusa_verified_packed_path,
+                                 int*           h_medusa_last_match_idx_buf,
+                                 curandState_t* curand_state,
+                                 int*           end_ids)
+{
+    std::fill(h_medusa_verified_length, h_medusa_verified_length + batch_size, 0);
+
+    if (inited_count != 0) {
+        model_->postDecodeEmbedding(medusa_logits_buf,
+                                    medusa_local_logits_buf,
+                                    medusa_inited_hidden_states_buf,
+                                    medusa_input_length * inited_count);
+        model_->dynamicDecode(
+            medusa_input_length * inited_count, medusa_logits_buf, curand_state, end_ids, medusa_token_ids_buf);
+
+        std::vector<int> inited_input_ids(medusa_input_length * inited_count, -1);
+        std::vector<int> ref_output_ids(medusa_input_length * inited_count, -2);
+        Copy(medusa_inited_input_ids_buf, medusa_input_length * inited_count, inited_input_ids.data());
+        Copy(medusa_token_ids_buf, medusa_input_length * inited_count, ref_output_ids.data());
+
+        std::vector<int> unpacked_input_ids(inited_count * medusa_path_num * (1 + medusa_num_heads), -1);
+        std::vector<int> unpacked_each_path_len(medusa_path_num, -1);
+        std::vector<int> unpacked_output_ids(inited_count * medusa_path_num * (1 + medusa_num_heads), -1);
+
+        check_cuda_error(cudaStreamSynchronize(stream_));
+        medusa_util_->get_path_tree().get_batched_output_ids(inited_input_ids.data(),
+                                                             medusa_num_heads,
+                                                             inited_count,
+                                                             unpacked_input_ids.data(),
+                                                             unpacked_each_path_len.data());
+        medusa_util_->get_path_tree().get_batched_output_ids(
+            ref_output_ids.data(), medusa_num_heads, inited_count, unpacked_output_ids.data(), nullptr);
+
+        Copy(unpacked_input_ids.data(),
+             inited_count * medusa_path_num * (1 + medusa_num_heads),
+             medusa_input_tokens_buf);
+        Copy(unpacked_output_ids.data(),
+             inited_count * medusa_path_num * (1 + medusa_num_heads),
+             medusa_output_tokens_buf);
+        Copy(unpacked_each_path_len.data(), medusa_path_num, medusa_each_path_len_buf);
+        check_cuda_error(cudaStreamSynchronize(stream_));
+
+        invokeMedusaBatchMatch(medusa_input_tokens_buf,
+                               medusa_output_tokens_buf,
+                               medusa_each_path_len_buf,
+                               medusa_max_match_length_buf,
+                               medusa_max_match_idx_buf,
+                               inited_count,
+                               medusa_path_num,
+                               medusa_num_heads,
+                               stream_);
+        Copy(medusa_max_match_length_buf, inited_count, h_medusa_max_match_length_buf);
+        Copy(medusa_max_match_idx_buf, inited_count, h_medusa_max_match_idx_buf);
+        check_cuda_error(cudaStreamSynchronize(stream_));
+
+        // used for GatherOutput
+        int inited_cnt = 0;
+        for (int i = 0; i < batch_size; i++) {
+            if (state_->sequences[i]->iter == 0) {
+                h_medusa_verified_length[i] = 0;
+            }
+            else {
+                h_medusa_verified_length[i] = h_medusa_max_match_length_buf[inited_cnt++];
+            }
+        }
+        Copy(h_medusa_verified_length, batch_size, medusa_verified_length);
+
+        medusa_util_->get_path_tree().get_batched_last_match_idx(
+            h_medusa_max_match_idx_buf, h_medusa_max_match_length_buf, inited_count, h_medusa_last_match_idx_buf);
+
+        medusa_util_->get_path_tree().get_batched_matched_part_idx(h_medusa_max_match_idx_buf,
+                                                                   h_medusa_verified_length,
+                                                                   batch_size,
+                                                                   medusa_num_heads,
+                                                                   h_medusa_verified_packed_path);
+        Copy(h_medusa_verified_packed_path, batch_size * (1 + medusa_num_heads), medusa_verified_packed_path);
+        check_cuda_error(cudaStreamSynchronize(stream_));
+    }
+    else {
+        Copy(h_medusa_verified_length, batch_size, medusa_verified_length);
+    }
+}
+
+template<typename T>
+void LlamaBatch<T>::MedusaGenerate(const int      step,
+                                   const int      batch_size,
+                                   const int      hidden_size,
+                                   const int      medusa_input_length,
+                                   const int      medusa_num_heads,
+                                   const int      medusa_top_k,
+                                   const T*       medusa_all_hidden_states_buf,
+                                   const int*     h_medusa_last_match_idx_buf,
+                                   const int*     h_medusa_max_match_length_buf,
+                                   const int*     h_medusa_max_match_idx_buf,
+                                   bool&          medusa_should_stop,
+                                   T*             medusa_verified_hidden_states_buf,
+                                   float*         medusa_logits_buf,
+                                   float*         medusa_local_logits_buf,
+                                   int*           medusa_topk_output_ids_buf,
+                                   int*           medusa_token_ids_buf,
+                                   int*           token_ids_buf,
+                                   int*           h_medusa_preds_batched_buf,
+                                   int*           h_pseudo_inputs_buf,
+                                   curandState_t* curand_state,
+                                   int*           end_ids)
+{
+    T*  medusa_verified_hidden_states_buf_dst = medusa_verified_hidden_states_buf;
+    int inited_idx                            = 0;
+    for (int i = 0; i < batch_size; i++) {
+        T* medusa_all_hidden_states_buf_src =
+            const_cast<T*>(medusa_all_hidden_states_buf) + i * medusa_input_length * hidden_size;
+        if (state_->sequences[i]->iter != 0) {
+            medusa_verified_hidden_states_buf_dst =
+                Copy(medusa_all_hidden_states_buf_src + h_medusa_last_match_idx_buf[inited_idx++] * hidden_size,
+                     hidden_size,
+                     medusa_verified_hidden_states_buf_dst);
+        }
+        else {
+            medusa_verified_hidden_states_buf_dst =
+                Copy(medusa_all_hidden_states_buf_src, hidden_size, medusa_verified_hidden_states_buf_dst);
+        }
+    }
+
+    model_->postDecodeEmbedding(
+        medusa_logits_buf, medusa_local_logits_buf, medusa_verified_hidden_states_buf, batch_size);
+
+    model_->dynamicDecode(batch_size, medusa_logits_buf, curand_state, end_ids, medusa_token_ids_buf);
+
+    model_->medusaForward(medusa_topk_output_ids_buf, medusa_verified_hidden_states_buf, batch_size, medusa_top_k);
+
+    Copy(medusa_topk_output_ids_buf, batch_size * medusa_num_heads * medusa_top_k, h_medusa_preds_batched_buf);
+    check_cuda_error(cudaStreamSynchronize(stream_));
+
+    medusa_util_->get_path_tree().get_batched_pseudo_ids_from_tree(h_medusa_preds_batched_buf,
+                                                                   medusa_num_heads,
+                                                                   medusa_top_k,
+                                                                   h_medusa_max_match_length_buf,
+                                                                   h_medusa_max_match_idx_buf,
+                                                                   batch_size,
+                                                                   h_pseudo_inputs_buf);
+    invokeTransposeAxis01(h_pseudo_inputs_buf, h_pseudo_inputs_buf, batch_size, medusa_input_length - 1, 1, stream_);
+    Copy(medusa_token_ids_buf, batch_size, token_ids_buf + step * batch_size);
+    Copy(h_pseudo_inputs_buf, batch_size * (medusa_input_length - 1), token_ids_buf + (step + 1) * batch_size);
 }
 
 template class LlamaBatch<half>;

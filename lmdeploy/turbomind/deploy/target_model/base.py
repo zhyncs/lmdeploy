@@ -75,6 +75,10 @@ class TurbomindModelConfig:
     lora_max_wo_r: int = 0
     lora_rank_pattern: str = ''
     lora_scale_pattern: str = ''
+    medusa_num_heads: int = 0
+    medusa_num_layers: int = 0
+    medusa_choice_path: str = ''
+    medusa_choice_name: str = ''
 
     @classmethod
     def from_dict(cls, env, allow_none=False):

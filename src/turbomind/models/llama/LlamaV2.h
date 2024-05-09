@@ -29,6 +29,7 @@
 #include "src/turbomind/models/llama/SequenceManager.h"
 #include "src/turbomind/models/llama/llama_params.h"
 #include "src/turbomind/models/llama/unified_decoder.h"
+#include "src/turbomind/models/medusa_plugin/medusa_head.h"
 #include "src/turbomind/utils/allocator.h"
 #include "src/turbomind/utils/cublasMMWrapper.h"
 #include "src/turbomind/utils/instance_comm.h"
@@ -76,7 +77,9 @@ public:
             cublasMMWrapper*             cublas_wrapper,
             IAllocator*                  allocator,
             bool                         is_free_buffer_after_forward,
-            cudaDeviceProp*              cuda_device_prop);
+            cudaDeviceProp*              cuda_device_prop,
+            int                          medusa_num_heads  = 0,
+            int                          medusa_num_layers = 0);
 
     struct Control {
         AbstractInstanceComm* comm;
@@ -132,7 +135,11 @@ private:
                         int              dc_batch_size,
                         int              pf_batch_size,
                         int*             lora_mask,
-                        const Sequence** sequences);
+                        const Sequence** sequences,
+                        const int*       medusa_ti        = nullptr,
+                        const int*       medusa_mask      = nullptr,
+                        const int*       enable_medusa    = nullptr,
+                        const int        medusa_input_len = 64);
 
     void postDecodeEmbedding(float* logits, float* local_logits, const T* decoder_output, int batch_size);
 
@@ -152,6 +159,11 @@ private:
                        size_t          max_context_len,
                        size_t          token_ids_len,
                        size_t          batch_size);
+
+    void medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size, const int top_k);
+
+    void dynamicDecode(
+        const size_t batch_size, const float* logits, curandState_t* curand_state, int* end_ids, int* output_ids);
 
 private:
     friend class LlamaBatch<T>;
@@ -188,11 +200,17 @@ private:
 
     std::unique_ptr<UnifiedDecoder<T>> unified_decoder_;
     DynamicDecodeLayer<float>*         dynamic_decode_layer_{};
+    DynamicDecodeLayer<float>*         medusa_dynamic_decode_layer_{};
 
     std::shared_ptr<SharedState>   shared_state_;
     ffi_api_lock_ctrl_t            ffi_lock_;
     std::unique_ptr<LlamaBatch<T>> batch_;
     LoraParams                     lora_params_;
+
+    int                            medusa_num_heads_  = 0;
+    int                            medusa_num_layers_ = 0;
+    std::unique_ptr<MedusaHead<T>> medusa_head_;
+    int                            cache_block_seq_len_ = 0;
 };
 
 }  // namespace turbomind

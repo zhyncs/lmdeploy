@@ -52,7 +52,11 @@ struct Mainloop<arch::Sm70, Impl_> {
                                int            mask_iter,
                                float          qk_scale,
                                SharedStorage& storage,
-                               const StoreS&  store_S)
+                               const StoreS&  store_S,
+                               const int*     medusa_mask,
+                               int            history_len,
+                               int            medusa_input_len,
+                               int            query_idx)
     {
         GmemIterK gmem_K{};
         GmemIterV gmem_V{};
@@ -117,7 +121,7 @@ struct Mainloop<arch::Sm70, Impl_> {
             loop(std::false_type{}, std::false_type{});
         }
     }
-
+    // TODO add support for sm70
     __device__ void ApplyCasualMask(FragS& frag_S, int offset_Q, int offset_K)
     {
         Impl::ForeachS(frag_S, [&](int hi, int qi, int si, int ri, float& score) {

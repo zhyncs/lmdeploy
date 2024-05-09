@@ -278,6 +278,102 @@ void invokeGatherOutput(int*         output_ids,
         output_ids, ids, context_length, max_context_len, max_gen_step, max_output_len, batch_size);
 }
 
+__global__ void gatherOutput(int*       output_ids,
+                             int*       next_input_ids,
+                             const int* ids,
+                             const int* last_input_ids,
+                             const int* verified_length,
+                             const int* context_length,
+                             const int* verified_packed_path,
+                             int        max_context_len,
+                             int        max_gen_step,
+                             int        max_output_len,
+                             int        stride_len,
+                             int        batch_size,
+                             int        medusa_head_num)
+{
+    const int batch_id    = blockIdx.x;
+    const int context_len = context_length[batch_id];
+    output_ids += batch_id * max_output_len;
+    const int verified_len = verified_length ? verified_length[batch_id] : 0;
+    if (next_input_ids) {
+        next_input_ids += batch_id * max_output_len;
+    }
+    if (verified_packed_path) {
+        verified_packed_path += batch_id * (1 + medusa_head_num);
+    }
+
+    for (int src_idx = threadIdx.x; src_idx < max_gen_step; src_idx += blockDim.x) {
+        if (context_len <= src_idx && src_idx < max_context_len) {
+            continue;
+        }
+        if (src_idx < max_gen_step - stride_len) {
+            const int dst_idx = src_idx < context_len ? src_idx : src_idx - (max_context_len - context_len);
+            if (dst_idx < max_output_len) {
+                output_ids[dst_idx] = ids[src_idx * batch_size + batch_id];
+            }
+        }
+        else {
+            const int input_dst_idx = src_idx - (max_gen_step - stride_len);
+            if (next_input_ids) {
+                next_input_ids[input_dst_idx] = ids[src_idx * batch_size + batch_id];
+            }
+            const int last_src_idx = src_idx - (max_gen_step - stride_len);
+
+            if (src_idx != max_gen_step - 1 && last_src_idx == 0) {
+                continue;
+            }
+            if (last_input_ids && last_src_idx <= verified_len) {
+                int       true_packed_idx = (verified_packed_path) ? verified_packed_path[last_src_idx] : last_src_idx;
+                const int dst_idx         = src_idx - (max_context_len - context_len) - 1;
+                if (dst_idx < max_output_len) {
+                    output_ids[dst_idx] = last_input_ids[true_packed_idx * batch_size + batch_id];
+                }
+            }
+
+            if (src_idx == max_gen_step - 1) {
+                const int new_src_idx = src_idx - (stride_len - 1);
+                const int dst_idx     = src_idx - (max_context_len - context_len) - (stride_len - verified_len) + 1;
+                if (dst_idx < max_output_len) {
+                    output_ids[dst_idx] = ids[new_src_idx * batch_size + batch_id];
+                }
+            }
+        }
+    }
+}
+
+void invokeGatherOutput(int*         output_ids,
+                        int*         next_input_ids,
+                        const int*   ids,
+                        const int*   last_input_ids,
+                        const int*   verified_length,
+                        const int*   context_length,
+                        const int*   verified_packed_path,
+                        int          max_context_len,
+                        int          max_gen_step,
+                        int          max_output_len,
+                        int          batch_size,
+                        int          stride_len,
+                        int          medusa_head_num,
+                        cudaStream_t stream)
+{
+    int block_size = 128;
+    int grid_size  = batch_size;
+    gatherOutput<<<grid_size, block_size, 0, stream>>>(output_ids,
+                                                       next_input_ids,
+                                                       ids,
+                                                       last_input_ids,
+                                                       verified_length,
+                                                       context_length,
+                                                       verified_packed_path,
+                                                       max_context_len,
+                                                       max_gen_step,
+                                                       max_output_len,
+                                                       stride_len,
+                                                       batch_size,
+                                                       medusa_head_num);
+}
+
 __global__ void updateOutput(int**      request_output_ids_ptrs,
                              int**      request_seqlen_ptrs,
                              const int* output_ids,
@@ -560,5 +656,189 @@ void invokeBatchedCopy(void** src_ptr, void** dst_ptr, int* size, int count, cud
             }
         });
 }
+
+template<int BLOCK_SIZE_>
+__global__ void medusaBatchedMatch(const int* __restrict__ input_ids,
+                                   const int* __restrict__ output_ids,
+                                   const int* each_path_length,
+                                   int*       match_length,
+                                   int*       match_idx,
+                                   const int  path_num,
+                                   int        size)
+{
+    const int length  = size + 1;
+    const int limit_r = gridDim.x * path_num * length;
+    const int bid     = blockIdx.x;
+    const int tid     = threadIdx.x;
+
+    typedef cub::BlockReduce<TopK_2<int>, BLOCK_SIZE_> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage       temp_storage;
+
+    TopK_2<int> partial;
+    partial.init();
+
+    for (int idx = tid; idx < path_num; idx += BLOCK_SIZE_) {
+        int start_id = bid * path_num * length + idx * length;
+        int limit_size_now;
+        if (each_path_length) {
+            limit_size_now = each_path_length[idx];
+        }
+        int accumulate_length = 0;
+        for (int i = 0; i < limit_size_now && (start_id + i) < limit_r; ++i) {
+            if (input_ids[start_id + i + 1] == output_ids[start_id + i]) {
+                ++accumulate_length;
+            }
+            else {
+                break;
+            }
+        }
+        partial.insert(accumulate_length, idx);
+    }
+
+    TopK_2<int> total = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2<int>);
+
+    if (tid == 0) {
+        const int index     = bid;
+        match_length[index] = total.u;
+        if (match_idx) {
+            match_idx[index] = total.p;
+        }
+    }
+    __syncthreads();
+}
+
+void invokeMedusaBatchMatch(const int*   input_ids,
+                            const int*   output_ids,
+                            const int*   each_path_length,
+                            int*         max_match_length,
+                            int*         max_match_idx,
+                            int          batch_size,
+                            int          path_num,
+                            int          medusa_head_num,
+                            cudaStream_t stream)
+{
+    dim3 grid, block;
+    grid.x  = batch_size;
+    block.x = 64;
+    medusaBatchedMatch<64><<<grid, block, 0, stream>>>(
+        input_ids, output_ids, each_path_length, max_match_length, max_match_idx, path_num, medusa_head_num);
+}
+
+template<typename T>
+__global__ void compactCache(uintptr_t* cache_block_ptrs,
+                             const int* sequence_length,
+                             const int* medusa_verified_packed_idx,
+                             const int* medusa_verified_length,
+                             const int* cu_block_counts,
+                             const int  kv_layer_num,
+                             const int  kv_head_num,
+                             const int  kv_cache_block_len,
+                             const int  kv_head_dim,
+                             const int  medusa_input_len,
+                             const int  medusa_head_num,
+                             const bool is_V)
+{
+
+    const int thread_idx  = threadIdx.x;
+    const int batch_idx   = blockIdx.y / kv_layer_num;
+    const int layer_idx   = blockIdx.y % kv_layer_num;
+    const int kv_head_idx = blockIdx.z;
+
+    const int match_count = medusa_verified_length[batch_idx];
+    if (match_count == 0) {
+        return;
+    }
+
+    uintptr_t* now_batch_block_ptrs     = cache_block_ptrs + cu_block_counts[batch_idx];
+    int        layer_offset             = layer_idx * kv_head_num * kv_cache_block_len * 2 * kv_head_dim;
+    int        head_offset              = kv_head_idx * kv_cache_block_len * kv_head_dim * 2;
+    const int  first_generate_token_idx = sequence_length[batch_idx] - medusa_input_len;
+    int        V_offset                 = is_V ? kv_cache_block_len * kv_head_dim : 0;
+
+    for (int packed_i = 1; packed_i <= match_count; packed_i++) {
+        int dst_packed_idx = *(medusa_verified_packed_idx + batch_idx * (1 + medusa_head_num) + packed_i);
+        int dst_token_idx  = first_generate_token_idx + packed_i;        // dst
+        int src_token_idx  = first_generate_token_idx + dst_packed_idx;  // src
+
+        int dst_kv_block_idx       = dst_token_idx / kv_cache_block_len;
+        int dst_token_kv_block_idx = dst_token_idx % kv_cache_block_len;
+        int src_kv_block_idx       = src_token_idx / kv_cache_block_len;
+        int src_token_kv_block_idx = src_token_idx % kv_cache_block_len;
+
+        T* dst_block_ptr_start = (T*)(*(now_batch_block_ptrs + dst_kv_block_idx));
+        T* src_block_ptr_start = (T*)(*(now_batch_block_ptrs + src_kv_block_idx));
+
+        int src_token_offset = src_token_kv_block_idx * kv_head_dim;
+        int dst_token_offset = dst_token_kv_block_idx * kv_head_dim;
+
+        dst_block_ptr_start[layer_offset + head_offset + dst_token_offset + thread_idx + V_offset] =
+            src_block_ptr_start[layer_offset + head_offset + src_token_offset + thread_idx + V_offset];
+    }
+}
+
+template<typename T>
+void invokeCompactKVCache(uintptr_t*   block_ptrs,
+                          const int*   sequence_length,
+                          const int*   medusa_verified_packed_idx,
+                          const int*   medusa_verified_length,
+                          const int*   cu_block_counts,
+                          const int    kv_layer_num,
+                          const int    kv_head_num,
+                          const int    kv_cache_block_len,
+                          const int    kv_head_dim,
+                          const int    medusa_input_len,
+                          const int    medusa_head_num,
+                          const int    batch_size,
+                          cudaStream_t stream)
+{
+    constexpr int block_size = 128;
+    dim3          grid(1, batch_size * kv_layer_num, kv_head_num);
+    // apply to K
+    compactCache<T><<<grid, block_size, 0, stream>>>(block_ptrs,
+                                                     sequence_length,
+                                                     medusa_verified_packed_idx,
+                                                     medusa_verified_length,
+                                                     cu_block_counts,
+                                                     kv_layer_num,
+                                                     kv_head_num,
+                                                     kv_cache_block_len,
+                                                     kv_head_dim,
+                                                     medusa_input_len,
+                                                     medusa_head_num,
+                                                     false);
+    // apply to V
+    compactCache<T><<<grid, block_size, 0, stream>>>(block_ptrs,
+                                                     sequence_length,
+                                                     medusa_verified_packed_idx,
+                                                     medusa_verified_length,
+                                                     cu_block_counts,
+                                                     kv_layer_num,
+                                                     kv_head_num,
+                                                     kv_cache_block_len,
+                                                     kv_head_dim,
+                                                     medusa_input_len,
+                                                     medusa_head_num,
+                                                     true);
+}
+#define INSTANTIATE_INVOKE_COMPACT_KV_CACHE(T)                                                                         \
+    template void invokeCompactKVCache<T>(uintptr_t * block_ptrs,                                                      \
+                                          const int*   sequence_length,                                                \
+                                          const int*   medusa_verified_packed_idx,                                     \
+                                          const int*   medusa_verified_length,                                         \
+                                          const int*   cu_block_counts,                                                \
+                                          const int    kv_layer_num,                                                   \
+                                          const int    kv_head_num,                                                    \
+                                          const int    kv_cache_block_len,                                             \
+                                          const int    kv_head_dim,                                                    \
+                                          const int    medusa_input_len,                                               \
+                                          const int    medusa_head_num,                                                \
+                                          const int    batch_size,                                                     \
+                                          cudaStream_t stream)
+INSTANTIATE_INVOKE_COMPACT_KV_CACHE(half);
+INSTANTIATE_INVOKE_COMPACT_KV_CACHE(float);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_COMPACT_KV_CACHE(__nv_bfloat16);
+#endif
+#undef INSTANTIATE_INVOKE_COMPACT_KV_CACHE
 
 }  // namespace turbomind
