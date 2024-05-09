@@ -922,7 +922,8 @@ void LlamaBatch<T>::FreeBuffer()
 }
 
 template<typename T>
-LlamaBatch<T>::LlamaBatch(const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model):
+LlamaBatch<T>::LlamaBatch(
+    const EngineParams& params, int cache_block_seq_len, int quant_policy, LlamaV2<T>* model, int medusa_num_heads):
     max_batch_size_(params.max_batch_size),
     max_context_token_num_(params.max_context_token_num),
     session_len_(params.session_len),
@@ -933,7 +934,9 @@ LlamaBatch<T>::LlamaBatch(const EngineParams& params, int cache_block_seq_len, i
     data_type_(getTensorType<T>()),
     num_tokens_per_iter_(params.num_tokens_per_iter),
     extra_tokens_per_iter_(params.extra_tokens_per_iter),
-    max_prefill_iters_(params.max_prefill_iters)
+    max_prefill_iters_(params.max_prefill_iters),
+    medusa_num_heads_(medusa_num_heads),
+    medusa_enable_(medusa_num_heads != 0)
 {
     stream_         = model_->stream_;
     allocator_      = model_->allocator_;
