@@ -77,6 +77,19 @@ void invokeGatherOutput(int*         output_ids,
                         int          batch_size,
                         cudaStream_t stream);
 
+void invokeGatherOutput(int*         output_ids,
+                        int*         next_input_ids,
+                        const int*   ids,
+                        const int*   last_input_ids,
+                        const int*   verified_length,
+                        const int*   context_length,
+                        int          max_context_len,
+                        int          max_gen_step,
+                        int          max_output_len,
+                        int          batch_size,
+                        int          stride_len,
+                        cudaStream_t stream);
+
 void invokeUpdateOutput(int**        request_output_ids_ptrs,
                         int**        request_seqlen_ptrs,
                         const int*   output_ids,

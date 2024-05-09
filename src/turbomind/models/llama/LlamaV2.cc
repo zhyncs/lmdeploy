@@ -120,6 +120,7 @@ LlamaV2<T>::~LlamaV2()
 {
     unified_decoder_.reset();
     delete dynamic_decode_layer_;
+    delete medusa_dynamic_decode_layer_;
 }
 
 template<typename T>
@@ -156,6 +157,15 @@ void LlamaV2<T>::initialize(const LlamaAttentionParams& attn_params,
                                                           allocator_,
                                                           is_free_buffer_after_forward_,
                                                           cuda_device_prop_);
+
+    medusa_dynamic_decode_layer_ = new DynamicDecodeLayer<float>(vocab_size_,
+                                                                 vocab_size_padded_,
+                                                                 0,
+                                                                 stream_,
+                                                                 cublas_wrapper_,
+                                                                 allocator_,
+                                                                 is_free_buffer_after_forward_,
+                                                                 cuda_device_prop_);
 }
 
 template<typename T>
@@ -428,6 +438,39 @@ void LlamaV2<T>::dynamicDecode(int*            token_ids,
     }
 
     dynamic_decode_layer_->forward(&dynamic_decode_output_tensors, &dynamic_decode_input_tensors);
+}
+
+template<typename T>
+void LlamaV2<T>::dynamicDecode(const size_t   batch_size,
+                               const float*   logits,
+                               const int      step,
+                               curandState_t* curand_state,
+                               int*           end_ids,
+                               int*           output_ids,
+                               bool*          finished)
+{
+    const int ite              = 0;
+    const int max_input_length = 0;
+
+    std::unordered_map<std::string, Tensor> dynamic_decode_input_tensors{
+        {"logits", {MEMORY_GPU, TYPE_FP32, {batch_size, (size_t)1, vocab_size_padded_}, logits}},
+        {"step", {MEMORY_CPU, TYPE_INT32, {1}, &step}},
+        {"max_input_length", {MEMORY_CPU, TYPE_INT32, {1}, &max_input_length}},
+        {"ite", {MEMORY_CPU, TYPE_UINT32, {1}, &ite}},
+        {"end_id", {MEMORY_GPU, TYPE_INT32, {batch_size}, end_ids}},
+        {"local_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &batch_size}},
+    };
+
+    std::unordered_map<std::string, Tensor> dynamic_decode_output_tensors{
+        {"output_ids", {MEMORY_GPU, TYPE_INT32, {1U, batch_size, 1U}, output_ids}},
+        {"finished", {MEMORY_GPU, TYPE_BOOL, {batch_size}, finished}},
+        {"sequence_length", {MEMORY_GPU, TYPE_INT32, {batch_size}, nullptr}},
+        {"curand_state", {MEMORY_GPU, TYPE_VOID, {batch_size}, curand_state}},
+    };
+
+    TensorMap runtime_args;
+    medusa_dynamic_decode_layer_->setup(batch_size, 1, &runtime_args);
+    medusa_dynamic_decode_layer_->forward(&dynamic_decode_output_tensors, &dynamic_decode_input_tensors);
 }
 
 static inline Tensor slice(const Tensor& tensor, int index)

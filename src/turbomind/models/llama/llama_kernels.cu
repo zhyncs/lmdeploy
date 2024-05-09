@@ -278,6 +278,93 @@ void invokeGatherOutput(int*         output_ids,
         output_ids, ids, context_length, max_context_len, max_gen_step, max_output_len, batch_size);
 }
 
+__global__ void gatherOutput(int*       output_ids,
+                             int*       next_input_ids,
+                             const int* ids,
+                             const int* last_input_ids,
+                             const int* verified_length,
+                             const int* context_length,
+                             int        max_context_len,
+                             int        max_gen_step,
+                             int        max_output_len,
+                             int        stride_len,
+                             int        batch_size)
+{
+    const int batch_id    = blockIdx.x;
+    const int context_len = context_length[batch_id];
+    output_ids += batch_id * max_output_len;
+    const int verified_len = verified_length ? verified_length[batch_id] : 0;
+    if (next_input_ids) {
+        next_input_ids += batch_id * max_output_len;
+    }
+    for (int src_idx = threadIdx.x; src_idx < max_gen_step; src_idx += blockDim.x) {
+        if (context_len <= src_idx && src_idx < max_context_len) {
+            continue;
+        }
+
+        if (src_idx < max_gen_step - stride_len) {
+            const int dst_idx = src_idx < context_len ? src_idx : src_idx - (max_context_len - context_len);
+            if (dst_idx < max_output_len) {
+                output_ids[dst_idx] = ids[src_idx * batch_size + batch_id];
+            }
+        }
+        else {
+            const int input_dst_idx = src_idx - (max_gen_step - stride_len);
+            if (next_input_ids) {
+                next_input_ids[input_dst_idx] = ids[src_idx * batch_size + batch_id];
+            }
+            const int last_src_idx = src_idx - (max_gen_step - stride_len);
+
+            if (src_idx != max_gen_step - 1 && last_src_idx == 0) {
+                continue;
+            }
+
+            if (last_input_ids && last_src_idx <= verified_len) {
+                const int dst_idx = src_idx - (max_context_len - context_len) - 1;
+                if (dst_idx < max_output_len) {
+                    output_ids[dst_idx] = last_input_ids[last_src_idx * batch_size + batch_id];
+                }
+            }
+
+            if (src_idx == max_gen_step - 1) {
+                const int new_src_idx = src_idx - (stride_len - 1);
+                const int dst_idx     = src_idx - (max_context_len - context_len) - (stride_len - verified_len) + 1;
+                if (dst_idx < max_output_len) {
+                    output_ids[dst_idx] = ids[new_src_idx * batch_size + batch_id];
+                }
+            }
+        }
+    }
+}
+
+void invokeGatherOutput(int*         output_ids,
+                        int*         next_input_ids,
+                        const int*   ids,
+                        const int*   last_input_ids,
+                        const int*   verified_length,
+                        const int*   context_length,
+                        int          max_context_len,
+                        int          max_gen_step,
+                        int          max_output_len,
+                        int          batch_size,
+                        int          stride_len,
+                        cudaStream_t stream)
+{
+    int block_size = 128;
+    int grid_size  = batch_size;
+    gatherOutput<<<grid_size, block_size, 0, stream>>>(output_ids,
+                                                       next_input_ids,
+                                                       ids,
+                                                       last_input_ids,
+                                                       verified_length,
+                                                       context_length,
+                                                       max_context_len,
+                                                       max_gen_step,
+                                                       max_output_len,
+                                                       stride_len,
+                                                       batch_size);
+}
+
 __global__ void updateOutput(int**      request_output_ids_ptrs,
                              int**      request_seqlen_ptrs,
                              const int* output_ids,
