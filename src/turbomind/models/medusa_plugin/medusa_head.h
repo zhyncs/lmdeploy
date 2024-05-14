@@ -44,14 +44,14 @@ private:
     size_t in_size_;
     size_t vocab_size_;
     int    medusa_num_heads_;
+    int max_k_ = 10;
 
     std::unique_ptr<ResBlock<T>>    resblock_;
     std::unique_ptr<LlamaLinear<T>> linear_;
 
-    T*    resblock_buf_;
-    void* workspace_buf_;
-    T*    medusa_head_logits_buf_;
-    int*  topk_output_ids_t_;
+    T*    resblock_buf_{};
+    void* workspace_buf_{};
+    T*    medusa_head_logits_buf_{};
 
     cudaStream_t     stream_;
     cublasMMWrapper* cublas_wrapper_;
