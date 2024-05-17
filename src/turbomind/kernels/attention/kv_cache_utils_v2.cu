@@ -130,7 +130,7 @@ __global__ void __launch_bounds__(128) ProcessKV_v2(char**       blocks,
             PRAGMA_UNROLL
             for (int s = 0; s < ITER_S; ++s) {
                 int ti = history_len + offset.y + s * Map::kDeltaS + token_idx;  // sequence local
-                if(enable_medusa && enable_medusa[batch_idx] && medusa_ti){
+                if (enable_medusa && enable_medusa[batch_idx] && medusa_ti) {
                     ti = history_len + medusa_ti[(offset.y + s * Map::kDeltaS) + token_idx];
                 }
                 rope.apply(vec_K[s][c], ti);
@@ -394,7 +394,7 @@ __global__ void __launch_bounds__(128) flattenKV_v2(T*           k,
             PRAGMA_UNROLL
             for (int s = 0; s < ITER_S; ++s) {
                 int ti = offset.y + s * Map::kDeltaS + token_idx;  // sequence local
-                if(enable_medusa && enable_medusa[batch_idx] && medusa_ti){
+                if (enable_medusa && enable_medusa[batch_idx] && medusa_ti) {
                     ti = medusa_ti[(offset.y + s * Map::kDeltaS) + token_idx];
                 }
                 rope.apply(out_K[s][c], ti);
@@ -502,7 +502,7 @@ void invokeFlattenKV_v2(T*           k,
                                      int          head_dim,                                                            \
                                      int          batch_size,                                                          \
                                      int          quant_policy,                                                        \
-                                     int*         enable_medusa,                                                       \ 
+                                     int*         enable_medusa,                                                       \
                                      int*         medusa_ti,                                                           \
                                      cudaStream_t stream);
 

@@ -37,7 +37,7 @@ void MedusaPathTree::dbg(MedusaPathTreeNode* node){
         }
         std::cout << node->top_k_idx_;
         if(node->is_leaf_){
-            std::cout << "(l)"; 
+            std::cout << "(l)";
         }
         std::cout << std::endl;
         for(std::pair<int, MedusaPathTreeNode*> each_pair: node->childs_){
@@ -56,7 +56,7 @@ void MedusaPathTree::getOrCreateMedusaTi(int** medusa_ti, int &len){
 }
 void MedusaPathTree::bfs(){
     bfs(root_);
-} 
+}
 void MedusaPathTree::bfs(MedusaPathTreeNode* root){
     std::queue<MedusaPathTreeNode*> q;
     q.push(root);
@@ -67,13 +67,13 @@ void MedusaPathTree::bfs(MedusaPathTreeNode* root){
     while(!q.empty()){
         MedusaPathTreeNode* node = q.front();
         q.pop();
-        
+
         if(!node)break;
 
         topk_value_of_paths.push_back(node->top_k_idx_);
 
         node->input_token_index_ = len_++;
-  
+
         ++depth_count[node->depth_];
 
         for(std::pair<int, MedusaPathTreeNode*> each_pair: node->childs_){
@@ -95,14 +95,14 @@ void MedusaPathTree::bfs(MedusaPathTreeNode* root){
     }
 
 
-} 
+}
 void MedusaPathTree::dfs(){
     medusaMask_ = new int[len_ * len_];
     std::fill_n(medusaMask_, len_ * len_, 0);
 
     std::vector<int> ancestor_ids;
     dfs(root_, ancestor_ids);
-} 
+}
 void MedusaPathTree::dfs(MedusaPathTreeNode* node, std::vector<int>& ancestor_ids){
     if(node){
         ancestor_ids.push_back(node->input_token_index_);
@@ -111,7 +111,7 @@ void MedusaPathTree::dfs(MedusaPathTreeNode* node, std::vector<int>& ancestor_id
             input_token_idx_of_paths.push_back(std::move(input_token_index_of_path));
         }
         int &row = node->input_token_index_;
-        
+
         for(const int &col : ancestor_ids){
             medusaMask_[row * len_ + col] = 1;
         }
@@ -122,7 +122,7 @@ void MedusaPathTree::dfs(MedusaPathTreeNode* node, std::vector<int>& ancestor_id
         }
         ancestor_ids.pop_back();
     }
-} 
+}
 void MedusaPathTree::getOrCreateMedusaMask(int** medusa_mask, int &len){
     if(!medusaMask_){
         dfs();
@@ -202,10 +202,10 @@ void MedusaPathTree::getPseudoIdsFromTree(const int* medusa_preds, const int med
     //      pseudo_inputs:[len_ - 1], return the values except root.
     int counter = 0;
 
-    
+
     bool skip_root = true;
     for(int& topk_value : topk_value_of_paths){
-        
+
         if(skip_root){
             skip_root = false;
             counter++;
@@ -230,7 +230,7 @@ void MedusaPathTree::getBatchedPseudoIdsFromTree(const int* medusa_preds_batched
         int* pseudo_inputs = pseudo_inputs_batched + b_id * (len_ - 1);
         getPseudoIdsFromTree(medusa_preds, medusa_head_num, top_k, max_match_count[b_id], max_match_idx[b_id], pseudo_inputs);
     }
-    
+
 }
 
 void MedusaPathTree::getLastMatchIdx(const int& max_match_idx, const int& max_match_count, int& last_input_idx){
@@ -239,7 +239,7 @@ void MedusaPathTree::getLastMatchIdx(const int& max_match_idx, const int& max_ma
 
 void MedusaPathTree::getBatchedLastMatchIdx(const int* max_match_idx, const int* max_match_count, int* last_input_idx, const int batch_size){
     /*
-    input : 
+    input :
         max_match_idx : [batch_size],
         max_match_count : [batch_size],
     output :
@@ -248,7 +248,7 @@ void MedusaPathTree::getBatchedLastMatchIdx(const int* max_match_idx, const int*
     for(int b_id = 0; b_id < batch_size; b_id++){
         getLastMatchIdx(max_match_idx[b_id], max_match_count[b_id], last_input_idx[b_id]);
     }
-} 
+}
 
 void MedusaPathTree::getMatchedPartIdx(const int& max_match_idx, const int& max_match_count, int* matched_part_input_idx){
     auto& paths = input_token_idx_of_paths[max_match_idx];
@@ -259,13 +259,13 @@ void MedusaPathTree::getMatchedPartIdx(const int& max_match_idx, const int& max_
 }
 void MedusaPathTree::getBatchedMatchedPartIdx(const int* max_match_idx, const int* max_match_count, int* matched_part_input_idx, const int batch_size, const int medusa_head_num){
     /*
-    input : 
+    input :
         max_match_idx : [batch_size],
         max_match_count : [batch_size],
     output :
         matched_part_input_idx : [batch_size, 1 + medusa_head_num],
     */
-    
+
     for(int b_id = 0; b_id < batch_size; b_id++){
         getMatchedPartIdx(max_match_idx[b_id], max_match_count[b_id], matched_part_input_idx + b_id * (1 + medusa_head_num));
     }
@@ -295,11 +295,11 @@ void MedusaUtils::getTokenIdsAccordingToPath(int* medusa_path_tokens_out, const 
     }
 }
 std::vector<int> MedusaUtils::parseTupleStr2TupleInt(const std::string& tuple_str) {
-    // tuple_str format is without ')' 
+    // tuple_str format is without ')'
     // like:
     // "[(0, 1", "[(0, 1, "
     std::vector<int> tuple;
-    std::stringstream ss(tuple_str); 
+    std::stringstream ss(tuple_str);
     std::string item;
     // remove the util '('
     std::getline(ss, item, '(');
@@ -309,7 +309,7 @@ std::vector<int> MedusaUtils::parseTupleStr2TupleInt(const std::string& tuple_st
     return tuple;
 }
 std::vector<std::vector<int>> MedusaUtils::getMedusaPathsFromLocalFile(const std::string& local_path, const std::string& aim_model_name){
-    // the medusa_paths format should like :  
+    // the medusa_paths format should like :
     //    modelname = [(0,), (0, 1), (2, 9, ), ...]
     std::ifstream file(local_path);
     std::vector<std::vector<int>> tuples;
@@ -320,7 +320,7 @@ std::vector<std::vector<int>> MedusaUtils::getMedusaPathsFromLocalFile(const std
         std::string readin_model_name;
         std::string tuple_str;
         std::getline(ss, readin_model_name, '=');
-        
+
         readin_model_name = removeAllWhiteSpaces(readin_model_name);
 
         if(readin_model_name != aim_model_name){

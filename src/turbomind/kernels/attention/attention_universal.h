@@ -423,12 +423,12 @@ struct AttentionUniversal {
         int mask_iter = (CTA_Q + CTA_S - 1) / CTA_S + 1;
 
         cache_iter.SetTile(iter_end - 1);
-        
+
         const int* medusa_mask = nullptr;
         if(params.enable_medusa && params.enable_medusa[batch_idx]){
             medusa_mask = params.medusa_mask;
             mask_iter = tile_iter + 1;
-        }        
+        }
 
         Mainloop mainloop;
         mainloop(frag_Q,
