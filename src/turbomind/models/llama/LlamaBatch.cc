@@ -607,7 +607,7 @@ void LlamaBatch<T>::Initialize(GenerationState& g)
     }
 
     for (int i = 0; i < batch_size; i++) {
-        if (h_medusa_sequences_length_[i] == 0) {
+        if (state_->sequences[i]->iter == 0){
             h_medusa_sequences_length_[i] = state_->h_context_length[i];
         }
     }
@@ -1390,10 +1390,10 @@ auto LlamaBatch<T>::Finish(GenerationState& g) -> std::vector<Signal>
         ++state_->h_context_length[i];
     }
     for (int i = 0; i < batch_size; i++) {
-        if ((state_->h_context_length[i]) >= h_seq_limit_len_[i]) {
+        if ((state_->h_context_length[i]) >= state_->seq_len_limit[i]) {
             state_->h_finished[i] = true;
             // fixme: need check this, after combine KVCache modify.
-            state_->h_context_length[i] = h_seq_limit_len_[i];
+            state_->h_context_length[i] = state_->seq_len_limit[i];
         }
         else {
             state_->h_finished[i] = false;
@@ -1481,7 +1481,7 @@ auto LlamaBatch<T>::Finish(GenerationState& g) -> std::vector<Signal>
     }
 
     for (int i = 0; i < batch_size - g.partial; i++) {
-        state_->h_context_length[i] += medusa_input_length_ - 1;  // next_input 的输入长度
+        state_->h_context_length[i] += medusa_input_length_ - 1; 
     }
 
     if (g.partial) {
