@@ -502,7 +502,7 @@ void invokeFlattenKV_v2(T*           k,
                                      int          head_dim,                                                            \
                                      int          batch_size,                                                          \
                                      int          quant_policy,                                                        \
-                                     int*         enable_medusa,                                                       \ 
+                                     int*         enable_medusa,                                                       \
                                      int*         medusa_ti,                                                           \
                                      cudaStream_t stream);
 

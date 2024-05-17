@@ -82,7 +82,7 @@ void invokeFlattenKV_v2(T*           k,
                         int          batch_size,
                         int          quant_policy,
                         int*         enable_medusa,
-                        int*         medusa_ti, 
+                        int*         medusa_ti,
                         cudaStream_t stream = {});
 
 /// TODO: remove `sum_k_len`

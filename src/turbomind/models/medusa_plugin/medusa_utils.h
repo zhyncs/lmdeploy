@@ -15,14 +15,14 @@
 namespace turbomind {
 
 struct MedusaPathTreeNode{
-  
-  int top_k_idx_; 
+
+  int top_k_idx_;
   int depth_;
-  int input_token_index_; 
+  int input_token_index_;
   bool is_leaf_;
 
 
-  std::map<int, MedusaPathTreeNode*> childs_; 
+  std::map<int, MedusaPathTreeNode*> childs_;
   MedusaPathTreeNode(int top_k_idx, int depth, int input_token_index, bool is_leaf):top_k_idx_(top_k_idx), depth_(depth), input_token_index_(input_token_index), is_leaf_(is_leaf){}
 
 };
@@ -39,15 +39,15 @@ class MedusaPathTree{
     }
   public:
     std::vector<std::vector<int>> input_token_idx_of_paths;
-    std::vector<int> topk_value_of_paths; 
+    std::vector<int> topk_value_of_paths;
   public:
-    void insert(std::vector<int> path_tuple); 
+    void insert(std::vector<int> path_tuple);
     void insert(std::vector<std::vector<int>> path_tuples);
     void dbg();
     void bfs();
     void dfs();
-  	void getOrCreateMedusaTi(int** medusa_ti, int &len);   
-  	void getOrCreateMedusaMask(int** medusa_mask, int &len); 
+  	void getOrCreateMedusaTi(int** medusa_ti, int &len);
+  	void getOrCreateMedusaMask(int** medusa_mask, int &len);
     void getOutputIds(const int* output_preds, int* output_ids, int* each_path_len, const int medusa_head_num);
     void getBatchedOutputIds(const int* output_preds_batched, int* output_ids_batched, int* each_path_len, const int medusa_head_num, const int batch_num);
     int  getMedusaPathNum();
@@ -64,14 +64,14 @@ class MedusaPathTree{
   	int* medusaMask_ = nullptr;
   	int* medusaTi_ = nullptr;
 
-    int len_; 
+    int len_;
     int path_num_;
   private:
     void dbg(MedusaPathTreeNode* node);
     void bfs(MedusaPathTreeNode* root);
     void dfs(MedusaPathTreeNode* node, std::vector<int>& ancestor_ids);
   	void deleteTree(MedusaPathTreeNode* root);
-  	
+
 };
 
 class MedusaUtils {
