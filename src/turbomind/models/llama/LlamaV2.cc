@@ -32,12 +32,15 @@
 #include "src/turbomind/models/llama/llama_params.h"
 #include "src/turbomind/models/llama/llama_utils.h"
 #include "src/turbomind/models/llama/unified_decoder.h"
+#include "src/turbomind/models/medusa_plugin/medusa_head.h"
 #include "src/turbomind/utils/Tensor.h"
 #include "src/turbomind/utils/cuda_utils.h"
 #include "src/turbomind/utils/logger.h"
 #include <functional>
 #include <memory>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 
 namespace turbomind {
 
@@ -261,7 +264,11 @@ void LlamaV2<T>::forwardUnified(T*               out,
                                 int              dc_batch_size,
                                 int              pf_batch_size,
                                 int*             lora_mask,
-                                const Sequence** sequences)
+                                const Sequence** sequences,
+                                const int*       medusa_ti,
+                                const int*       medusa_mask,
+                                const int*       enable_medusa,
+                                const int        medusa_input_len)
 {
     TM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
@@ -291,15 +298,21 @@ void LlamaV2<T>::forwardUnified(T*               out,
     const auto   dtype = getTensorType<T>();
     const size_t bsz   = dc_batch_size + pf_batch_size;
 
-    TensorMap inputs{{"decoder_input", {MEMORY_GPU, dtype, {token_num, hidden_units_}, decoder_input}},
-                     {"output_norm_weight", {MEMORY_GPU, dtype, {hidden_units_}, weights_->output_norm_weight}},
-                     {"h_q_len", {MEMORY_CPU, TYPE_INT32, {bsz}, h_input_length}},
-                     {"h_k_len", {MEMORY_CPU, TYPE_INT32, {bsz}, h_context_length}},
-                     {"finished", {MEMORY_GPU, TYPE_BOOL, {bsz}, finished}},
-                     {"dc_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &dc_batch_size}},
-                     {"pf_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &pf_batch_size}},
-                     {"rope_theta", {MEMORY_GPU, TYPE_FP32, {hidden_units_}, rope_theta}},
-                     {"cu_block_counts", {MEMORY_GPU, TYPE_INT32, {bsz}, cu_block_cnts}}};
+    TensorMap inputs{
+        {"decoder_input", {MEMORY_GPU, dtype, {token_num, hidden_units_}, decoder_input}},
+        {"output_norm_weight", {MEMORY_GPU, dtype, {hidden_units_}, weights_->output_norm_weight}},
+        {"h_q_len", {MEMORY_CPU, TYPE_INT32, {bsz}, h_input_length}},
+        {"h_k_len", {MEMORY_CPU, TYPE_INT32, {bsz}, h_context_length}},
+        {"finished", {MEMORY_GPU, TYPE_BOOL, {bsz}, finished}},
+        {"dc_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &dc_batch_size}},
+        {"pf_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &pf_batch_size}},
+        {"rope_theta", {MEMORY_GPU, TYPE_FP32, {hidden_units_}, rope_theta}},
+        {"cu_block_counts", {MEMORY_GPU, TYPE_INT32, {bsz}, cu_block_cnts}},
+        {"medusa_ti", {MEMORY_GPU, TYPE_INT32, {medusa_input_len}, medusa_ti}},
+        {"medusa_mask", {MEMORY_GPU, TYPE_INT32, {medusa_input_len * medusa_input_len}, medusa_mask}},
+        {"medusa_input_len", {MEMORY_CPU, TYPE_INT32, {1}, &medusa_input_len}},
+        {"enable_medusa", {MEMORY_GPU, TYPE_INT32, {bsz}, enable_medusa}},
+    };
 
     TensorMap outputs{{"decoder_output", {MEMORY_GPU, dtype, {token_num, hidden_units_}, decoder_output}},
                       {"block_ptrs", {MEMORY_GPU, TYPE_UINT64, {bsz}, block_ptrs}},
@@ -406,8 +419,7 @@ void LlamaV2<T>::dynamicDecode(int*            token_ids,
         {"input_lengths", {MEMORY_GPU, TYPE_INT32, {batch_size, 1}, context_length}},
         {"ite", {MEMORY_CPU, TYPE_UINT32, {1}, &ite}},
         {"end_id", {MEMORY_GPU, TYPE_INT32, {batch_size}, end_ids}},
-        {"local_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &local_batch_size}},
-    };
+        {"local_batch_size", {MEMORY_CPU, TYPE_INT32, {1}, &local_batch_size}}};
 
     const std::vector<std::string> optional_inputs{"stop_words_list",
                                                    "bad_words_list",
@@ -441,15 +453,11 @@ void LlamaV2<T>::dynamicDecode(int*            token_ids,
 }
 
 template<typename T>
-void LlamaV2<T>::dynamicDecode(const size_t   batch_size,
-                               const float*   logits,
-                               const int      step,
-                               curandState_t* curand_state,
-                               int*           end_ids,
-                               int*           output_ids,
-                               bool*          finished)
+void LlamaV2<T>::dynamicDecode(
+    const size_t batch_size, const float* logits, curandState_t* curand_state, int* end_ids, int* output_ids)
 {
     const int ite              = 0;
+    const int step             = 0;
     const int max_input_length = 0;
 
     std::unordered_map<std::string, Tensor> dynamic_decode_input_tensors{
@@ -463,7 +471,7 @@ void LlamaV2<T>::dynamicDecode(const size_t   batch_size,
 
     std::unordered_map<std::string, Tensor> dynamic_decode_output_tensors{
         {"output_ids", {MEMORY_GPU, TYPE_INT32, {1U, batch_size, 1U}, output_ids}},
-        {"finished", {MEMORY_GPU, TYPE_BOOL, {batch_size}, finished}},
+        {"finished", {MEMORY_GPU, TYPE_BOOL, {batch_size}, nullptr}},
         {"sequence_length", {MEMORY_GPU, TYPE_INT32, {batch_size}, nullptr}},
         {"curand_state", {MEMORY_GPU, TYPE_VOID, {batch_size}, curand_state}},
     };
@@ -590,17 +598,18 @@ void LlamaV2<T>::forward(std::unordered_map<std::string, Tensor>*       outputs,
 }
 
 template<typename T>
-void LlamaV2<T>::medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size)
+void LlamaV2<T>::medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size, const int top_k)
 {
     turbomind::DataType dtype = turbomind::getTensorType<T>();
 
     turbomind::TensorMap inputs{
         {"medusa_head_input", {turbomind::MEMORY_GPU, dtype, {batch_size, hidden_units_}, input_buf}},
+        {"top_k", {turbomind::MEMORY_CPU, TYPE_INT32, {1}, &top_k}},
     };
 
     turbomind::TensorMap outputs{
         {"medusa_head_output",
-         {turbomind::MEMORY_GPU, dtype, {batch_size, (size_t)medusa_num_heads_, 1}, topk_output_ids}},
+         {turbomind::MEMORY_GPU, dtype, {batch_size, (size_t)medusa_num_heads_, top_k}, topk_output_ids}},
     };
 
     medusa_head_->forward(&outputs, &inputs, weights_->get_medusa_weight());

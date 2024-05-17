@@ -103,6 +103,9 @@ inline void UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMa
      *   \param dc_batch_size [1], int on cpu
      *   \param pf_batch_size [1], int on cpu
      *   \param layer_id [1], int on cpu
+     *   \param medusa_ti [medusa_input_len], int
+     *   \param medusa_mask [medusa_input_len * medusa_input_len], int
+     *   \param medusa_input_len [1], int on cpu
      *
      * output_tensors:
      *   \param hidden_features [token_num, hidden_dim], float
@@ -133,6 +136,11 @@ inline void UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMa
 
     T* attention_input = inputs->getPtr<T>("input_query");
     T* attention_out   = outputs->getPtr<T>("hidden_features");
+
+    int*      medusa_ti        = inputs->getPtr<int>("medusa_ti");
+    int*      medusa_mask      = inputs->getPtr<int>("medusa_mask");
+    int*      enable_medusa    = inputs->getPtr<int>("enable_medusa");
+    const int medusa_input_len = inputs->getVal<int>("medusa_input_len");
 
     /////////////////////////////////////////////
     /// allocate buffers
@@ -221,6 +229,11 @@ inline void UnifiedAttentionLayer<T>::forward(TensorMap* outputs, const TensorMa
         params.quant_policy = quant_policy_;
         // FT_CHECK(std::size(weights->past_kv_scale) == std::size(params.kv_quant_params));
         // std::copy(weights->past_kv_scale.begin(), weights->past_kv_scale.end(), std::begin(params.kv_quant_params));
+
+        params.medusa_ti        = medusa_ti;
+        params.medusa_mask      = medusa_mask;
+        params.medusa_input_len = medusa_input_len;
+        params.enable_medusa    = enable_medusa;
 #endif
         return params;
     };

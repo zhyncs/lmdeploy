@@ -284,11 +284,13 @@ __global__ void gatherOutput(int*       output_ids,
                              const int* last_input_ids,
                              const int* verified_length,
                              const int* context_length,
+                             const int* verified_packed_path,
                              int        max_context_len,
                              int        max_gen_step,
                              int        max_output_len,
                              int        stride_len,
-                             int        batch_size)
+                             int        batch_size,
+                             int        medusa_head_num)
 {
     const int batch_id    = blockIdx.x;
     const int context_len = context_length[batch_id];
@@ -297,11 +299,14 @@ __global__ void gatherOutput(int*       output_ids,
     if (next_input_ids) {
         next_input_ids += batch_id * max_output_len;
     }
+    if (verified_packed_path) {
+        verified_packed_path += batch_id * (1 + medusa_head_num);
+    }
+
     for (int src_idx = threadIdx.x; src_idx < max_gen_step; src_idx += blockDim.x) {
         if (context_len <= src_idx && src_idx < max_context_len) {
             continue;
         }
-
         if (src_idx < max_gen_step - stride_len) {
             const int dst_idx = src_idx < context_len ? src_idx : src_idx - (max_context_len - context_len);
             if (dst_idx < max_output_len) {
@@ -318,11 +323,11 @@ __global__ void gatherOutput(int*       output_ids,
             if (src_idx != max_gen_step - 1 && last_src_idx == 0) {
                 continue;
             }
-
             if (last_input_ids && last_src_idx <= verified_len) {
-                const int dst_idx = src_idx - (max_context_len - context_len) - 1;
+                int       true_packed_idx = (verified_packed_path) ? verified_packed_path[last_src_idx] : last_src_idx;
+                const int dst_idx         = src_idx - (max_context_len - context_len) - 1;
                 if (dst_idx < max_output_len) {
-                    output_ids[dst_idx] = last_input_ids[last_src_idx * batch_size + batch_id];
+                    output_ids[dst_idx] = last_input_ids[true_packed_idx * batch_size + batch_id];
                 }
             }
 
@@ -343,11 +348,13 @@ void invokeGatherOutput(int*         output_ids,
                         const int*   last_input_ids,
                         const int*   verified_length,
                         const int*   context_length,
+                        const int*   verified_packed_path,
                         int          max_context_len,
                         int          max_gen_step,
                         int          max_output_len,
                         int          batch_size,
                         int          stride_len,
+                        int          medusa_head_num,
                         cudaStream_t stream)
 {
     int block_size = 128;
@@ -358,11 +365,13 @@ void invokeGatherOutput(int*         output_ids,
                                                        last_input_ids,
                                                        verified_length,
                                                        context_length,
+                                                       verified_packed_path,
                                                        max_context_len,
                                                        max_gen_step,
                                                        max_output_len,
                                                        stride_len,
-                                                       batch_size);
+                                                       batch_size,
+                                                       medusa_head_num);
 }
 
 __global__ void updateOutput(int**      request_output_ids_ptrs,
@@ -646,6 +655,81 @@ void invokeBatchedCopy(void** src_ptr, void** dst_ptr, int* size, int count, cud
                     BatchedCopyLauncher<BatchedCopyParam<T, C>>{max_size, count, &params, st});
             }
         });
+}
+
+template<int BLOCK_SIZE_>
+__global__ void medusaBatchedMatchKernel(const int* __restrict__ input_ids,
+                                         const int* __restrict__ output_ids,
+                                         const int* each_path_length,
+                                         int*       match_length,
+                                         int*       match_idx,
+                                         const int  path_num,
+                                         int        size)
+{
+    //[b, path_num, 1 + head_num]
+    const int length  = size + 1;
+    const int limit_r = gridDim.x * path_num * length;
+    const int bid     = blockIdx.x;   // (0, batch_size)
+    const int tid     = threadIdx.x;  // (0, BLOCK_SIZE_)
+
+    typedef cub::BlockReduce<TopK_2<int>, BLOCK_SIZE_> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage       temp_storage;
+
+    TopK_2<int> partial;
+    partial.init();
+
+    for (int idx = tid; idx < path_num; idx += BLOCK_SIZE_) {
+        int start_id = bid * path_num * length + idx * length;  // belong to (bid, path_id)
+        int limit_size_now;
+        if (each_path_length) {
+            limit_size_now = each_path_length[idx];
+        }
+        int accumulate_length = 0;
+        for (int i = 0; i < limit_size_now && (start_id + i) < limit_r; ++i) {
+            if (input_ids[start_id + i + 1] == output_ids[start_id + i]) {
+                ++accumulate_length;
+            }
+            else {
+                break;
+            }
+        }
+        partial.insert(accumulate_length, idx);
+    }
+
+    TopK_2<int> total = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2<int>);
+
+    if (tid == 0) {
+        const int index     = bid;
+        match_length[index] = total.u;
+        if (match_idx) {
+            match_idx[index] = total.p;
+        }
+    }
+    __syncthreads();
+}
+
+void invokeMedusaBatchMatch(const int*   input_ids,
+                            const int*   output_ids,
+                            const int*   each_path_length,
+                            int*         max_match_length,
+                            int*         max_match_idx,
+                            int          batch_size,
+                            int          path_num,
+                            int          medusa_head_num,
+                            cudaStream_t stream)
+{
+    // inputs:
+    // input_ids: [batch_size, path_num, 1 + medusa_head_num]
+    // output_ids: [batch_size, path_num, 1 + medusa_head_num]
+    // each_path_length: [path_num]
+    // outputs:
+    // max_match_length: [batch_size]
+    // max_match_idx:[batch_size]
+    dim3 grid, block;
+    grid.x  = batch_size;
+    block.x = 64;
+    medusaBatchedMatchKernel<64><<<grid, block, 0, stream>>>(
+        input_ids, output_ids, each_path_length, max_match_length, max_match_idx, path_num, medusa_head_num);
 }
 
 }  // namespace turbomind

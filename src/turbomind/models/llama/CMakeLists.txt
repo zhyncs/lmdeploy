@@ -36,7 +36,8 @@ target_link_libraries(Llama PUBLIC CUDA::cudart
         nccl_utils
         cuda_utils
         logger
-        Medusa)
+        Medusa
+        MedusaUtils)
 
 
 add_executable(llama_gemm llama_gemm.cc)

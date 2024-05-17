@@ -135,7 +135,11 @@ private:
                         int              dc_batch_size,
                         int              pf_batch_size,
                         int*             lora_mask,
-                        const Sequence** sequences);
+                        const Sequence** sequences,
+                        const int*       medusa_ti        = nullptr,
+                        const int*       medusa_mask      = nullptr,
+                        const int*       enable_medusa    = nullptr,
+                        const int        medusa_input_len = 64);
 
     void postDecodeEmbedding(float* logits, float* local_logits, const T* decoder_output, int batch_size);
 
@@ -156,15 +160,10 @@ private:
                        size_t          token_ids_len,
                        size_t          batch_size);
 
-    void medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size);
+    void medusaForward(int* topk_output_ids, const T* input_buf, const size_t batch_size, const int top_k);
 
-    void dynamicDecode(const size_t   batch_size,
-                       const float*   logits,
-                       const int      step,
-                       curandState_t* curand_state,
-                       int*           end_ids,
-                       int*           output_ids,
-                       bool*          finished);
+    void dynamicDecode(
+        const size_t batch_size, const float* logits, curandState_t* curand_state, int* end_ids, int* output_ids);
 
 private:
     friend class LlamaBatch<T>;

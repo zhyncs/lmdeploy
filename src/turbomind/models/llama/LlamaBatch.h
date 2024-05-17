@@ -10,6 +10,7 @@
 #include "src/turbomind/models/llama/SequenceManager.h"
 #include "src/turbomind/models/llama/llama_kernels.h"
 #include "src/turbomind/models/llama/llama_params.h"
+#include "src/turbomind/models/medusa_plugin/medusa_utils.h"
 #include "src/turbomind/utils/allocator.h"
 #include "src/turbomind/utils/cublasMMWrapper.h"
 #include "src/turbomind/utils/cuda_utils.h"
@@ -310,29 +311,58 @@ private:
     int  medusa_num_heads_ = 0;
     bool medusa_enable_    = false;
 
-    int* medusa_verified_length_{};
-    int* h_medusa_verified_length_{};
+    // used for verification
+    T*   medusa_inited_hidden_states_buf_{};  // updated in MedusaCopy
+    int* medusa_inited_input_ids_buf_{};      // updated in MedusaCopy
 
-    int* h_medusa_cache_len_{};
-    int* h_medusa_sequences_length_{};
+    // used for generation
+    T* medusa_all_hidden_states_buf_{};       // updated in MedusaCopy
+    T* medusa_verified_hidden_states_buf_{};  // updated in MedusaVerify
 
-    T*   medusa_inited_hidden_states_buf_{};
-    int* medusa_inited_input_ids_buf_{};
-
-    T* medusa_all_hidden_states_buf_{};
-
+    // used for logits
     float* medusa_logits_buf_{};
     float* medusa_local_logits_buf_{};
 
+    // used for sampling
     int*  medusa_token_ids_buf_{};
     bool* medusa_finished_buf_{};
+    bool* h_medusa_finished_buf_{};
     int*  medusa_sequence_lengths_{};
+
+    // used for verification
+    int* medusa_ref_output_ids_buf_{};
+    int* medusa_max_match_length_buf_{};
+    int* h_medusa_max_match_length_buf_{};
+    int* medusa_max_match_idx_buf_{};
+    int* h_medusa_max_match_idx_buf_{};
+    int* h_medusa_last_match_idx_buf_{};
+    int* h_pseudo_inputs_buf_{};
+    int* h_medusa_preds_batched_buf_{};
+    int* medusa_verified_packed_path_{};
+    int* h_medusa_verified_packed_path_{};
+
+    int* medusa_topk_output_ids_buf_{};
+
+    int* medusa_verified_length_{};
+    int* h_medusa_verified_length_{};
+    int* h_medusa_sequences_length_{};
+    int* h_medusa_cache_len_{};
 
     int* last_input_ids_buf_{};
 
-    T* medusa_verified_hidden_states_buf_{};
+    // packed input length
+    int medusa_input_length_ = 0;
+    int medusa_path_num_     = 0;
+    int medusa_top_k_        = 10;
 
-    int* medusa_topk_output_ids_buf_{};
+    int* medusa_input_tokens_buf_{};
+    int* medusa_output_tokens_buf_{};
+    int* medusa_each_path_len_buf_{};
+
+    std::unique_ptr<MedusaUtils> medusa_utils_;
+    int*                         d_medusa_ti_{};
+    int*                         d_medusa_mask_{};
+    int*                         d_enable_medusa_{};
 };
 
 }  // namespace turbomind

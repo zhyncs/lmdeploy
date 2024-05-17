@@ -83,11 +83,13 @@ void invokeGatherOutput(int*         output_ids,
                         const int*   last_input_ids,
                         const int*   verified_length,
                         const int*   context_length,
+                        const int*   verified_packed_path,
                         int          max_context_len,
                         int          max_gen_step,
                         int          max_output_len,
                         int          batch_size,
                         int          stride_len,
+                        int          medusa_head_num,
                         cudaStream_t stream);
 
 void invokeUpdateOutput(int**        request_output_ids_ptrs,
@@ -179,5 +181,15 @@ inline void dump_sequence_len(int* d_seq_len, int step, int tp_rank, cudaStream_
     cudaStreamSynchronize(st);
     TM_LOG_ERROR("--------> rank = %d, step = %d, seq_len = %d <--------", tp_rank, step, h_seq_len);
 }
+
+void invokeMedusaBatchMatch(const int*   input_ids,
+                            const int*   output_ids,
+                            const int*   each_path_length,
+                            int*         max_match_length,
+                            int*         max_match_idx,
+                            int          batch_size,
+                            int          path_num,
+                            int          medusa_head_num,
+                            cudaStream_t stream);
 
 }  // namespace turbomind
