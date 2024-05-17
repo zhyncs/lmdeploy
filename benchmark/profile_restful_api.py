@@ -104,7 +104,6 @@ class Engine:
                     session_id=session_id,
                     ignore_eos=True):
                 timestamps.append(time.perf_counter())
-                print(output)
 
             first_token_latency = np.round(timestamps[1] - timestamps[0], 3)
             token_latency = np.round(timestamps[-1] - timestamps[0], 3)
