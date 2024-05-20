@@ -1104,8 +1104,8 @@ LlamaBatch<T>::LlamaBatch(
     back_     = &states_[1];
     incoming_ = &states_[2];
 
-    std::string medusa_path_filename = "/workdir/lmdeploy/src/turbomind/models/medusa_plugin/medusa_choices.info";
-    std::string aim_model_name       = "only_top1";
+    std::string aim_model_name       = params.aim_model_name;
+    std::string medusa_path_filename = params.medusa_path_filename;
     medusa_utils_                    = std::make_unique<MedusaUtils>(medusa_path_filename, aim_model_name);
     medusa_utils_->getInputLen(medusa_input_length_);
     medusa_utils_->getPathNum(medusa_path_num_);

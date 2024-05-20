@@ -225,6 +225,10 @@ LlamaTritonModel<T>::LlamaTritonModel(size_t      tensor_para_size,
     engine_params_.extra_tokens_per_iter = reader.GetInteger("llama", "extra_tokens_per_iter", 0);
     engine_params_.max_prefill_iters     = reader.GetInteger("llama", "max_prefill_iters", 1);
 
+    // medusa params
+    engine_params_.medusa_path_filename = reader.Get("llama", "medusa_path_filename");
+    engine_params_.aim_model_name       = reader.Get("llama", "medusa_aim_model_name");
+
     lora_params_.policy        = ft::getLoraPolicy(reader.Get("llama", "lora_policy", ""));
     lora_params_.r             = reader.GetInteger("llama", "lora_r", 0);
     lora_params_.scale         = reader.GetFloat("llama", "lora_scale", 0);

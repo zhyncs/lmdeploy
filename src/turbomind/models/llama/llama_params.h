@@ -33,6 +33,10 @@ struct EngineParams {
     int num_tokens_per_iter;
     int extra_tokens_per_iter;
     int max_prefill_iters;
+
+    // medusa params
+    std::string medusa_path_filename;
+    std::string aim_model_name;
 };
 
 struct LoraParams {
