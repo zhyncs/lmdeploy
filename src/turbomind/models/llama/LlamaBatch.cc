@@ -607,9 +607,10 @@ void LlamaBatch<T>::Initialize(GenerationState& g)
     }
 
     for (int i = 0; i < batch_size; i++) {
-        if (state_->sequences[i]->iter == 0){
+        if (state_->sequences[i]->iter == 0) {
             h_medusa_sequences_length_[i] = state_->h_context_length[i];
-        }else{
+        }
+        else {
             // update to avoid some requests removed from slot, leading to wrong info.
             h_medusa_sequences_length_[i] = state_->sequences[i]->cache_len + 1;
         }
@@ -2066,7 +2067,8 @@ void LlamaBatch<T>::MedusaVerify(const int inited_count, const int max_init_ctx_
                                                            medusa_num_heads_);
         Copy(h_medusa_verified_packed_path_, inited_count * (1 + medusa_num_heads_), medusa_verified_packed_path_);
         check_cuda_error(cudaStreamSynchronize(stream_));
-    }else{
+    }
+    else {
         // clear medusa_verified_length, prevent using previous result when first init.
         Copy(h_medusa_verified_length_, batch_size, medusa_verified_length_);
     }
