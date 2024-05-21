@@ -76,10 +76,10 @@ struct AttentionParams {
     cudaStream_t stream;
 
     // medusa
-    int *medusa_ti;
-    int *medusa_mask;
-    int *enable_medusa;
-    int medusa_input_len;
+    int* medusa_ti;
+    int* medusa_mask;
+    int* enable_medusa;
+    int  medusa_input_len;
 
     // debug
     float* qk;

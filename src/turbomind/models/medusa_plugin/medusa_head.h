@@ -44,7 +44,7 @@ private:
     size_t in_size_;
     size_t vocab_size_;
     int    medusa_num_heads_;
-    int max_k_ = 10;
+    int    max_k_ = 10;
 
     std::unique_ptr<ResBlock<T>>    resblock_;
     std::unique_ptr<LlamaLinear<T>> linear_;
