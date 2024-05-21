@@ -75,6 +75,8 @@ class TurbomindModelConfig:
     lora_scale_pattern: str = ''
     medusa_num_heads: int = 0
     medusa_num_layers: int = 0
+    medusa_path_filename: str = ''
+    medusa_aim_model_name: str = ''
 
     @classmethod
     def from_dict(cls, env, allow_none=False):
