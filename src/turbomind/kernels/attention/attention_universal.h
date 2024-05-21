@@ -235,7 +235,7 @@ struct AttentionUniversal {
             PRAGMA_UNROLL
             for (int s = 0; s < ITER_S; ++s) {
                 int ti = (offset.y + s * Map::kDeltaS) / CTA_H + query_idx + history_len;
-                if(params.enable_medusa && params.enable_medusa[batch_idx] && params.medusa_ti){
+                if (params.enable_medusa && params.enable_medusa[batch_idx] && params.medusa_ti) {
                     ti = history_len + params.medusa_ti[(offset.y + s * Map::kDeltaS) / CTA_H + query_idx];
                 }
                 rope.apply(vec_Q[s][c], ti);
@@ -250,8 +250,8 @@ struct AttentionUniversal {
         if (params.use_logn_attn) {
             PRAGMA_UNROLL
             for (int s = 0; s < ITER_S; ++s) {
-                int   ti = (offset.y + s * Map::kDeltaS) / CTA_H + query_idx + history_len;
-                if(params.enable_medusa && params.enable_medusa[batch_idx] && params.medusa_ti){
+                int ti = (offset.y + s * Map::kDeltaS) / CTA_H + query_idx + history_len;
+                if (params.enable_medusa && params.enable_medusa[batch_idx] && params.medusa_ti) {
                     ti = history_len + params.medusa_ti[(offset.y + s * Map::kDeltaS) / CTA_H + query_idx];
                 }
                 LogNScaling logn_scaling(ti, params.max_position_embeddings);
@@ -425,9 +425,9 @@ struct AttentionUniversal {
         cache_iter.SetTile(iter_end - 1);
 
         const int* medusa_mask = nullptr;
-        if(params.enable_medusa && params.enable_medusa[batch_idx]){
+        if (params.enable_medusa && params.enable_medusa[batch_idx]) {
             medusa_mask = params.medusa_mask;
-            mask_iter = tile_iter + 1;
+            mask_iter   = tile_iter + 1;
         }
 
         Mainloop mainloop;

@@ -121,7 +121,7 @@ struct Mainloop<arch::Sm70, Impl_> {
             loop(std::false_type{}, std::false_type{});
         }
     }
-    //todo: test on sm_80 first, here need to be changed.
+    // todo: test on sm_80 first, here need to be changed.
     __device__ void ApplyCasualMask(FragS& frag_S, int offset_Q, int offset_K)
     {
         Impl::ForeachS(frag_S, [&](int hi, int qi, int si, int ri, float& score) {
