@@ -192,4 +192,18 @@ void invokeMedusaBatchMatch(const int*   input_ids,
                             int          medusa_head_num,
                             cudaStream_t stream);
 
+template<typename T>
+void invokeCompactKVCache(uintptr_t*   block_ptrs,
+                          const int*   sequence_length,
+                          const int*   medusa_verified_packed_idx,
+                          const int*   medusa_verified_length,
+                          const int*   cu_block_counts,
+                          const int    kv_layer_num,
+                          const int    kv_head_num,
+                          const int    kv_cache_block_len,
+                          const int    kv_head_dim,
+                          const int    medusa_input_len,
+                          const int    medusa_head_num,
+                          const int    batch_size,
+                          cudaStream_t stream);
 }  // namespace turbomind

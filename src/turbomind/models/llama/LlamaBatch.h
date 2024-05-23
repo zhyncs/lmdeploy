@@ -348,6 +348,8 @@ private:
     int* h_medusa_sequences_length_{};
     int* h_medusa_cache_len_{};
 
+    int* medusa_context_length_begin_{};
+
     int* last_input_ids_buf_{};
 
     // packed input length

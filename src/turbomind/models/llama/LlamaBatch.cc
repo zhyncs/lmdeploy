@@ -817,6 +817,9 @@ void LlamaBatch<T>::AllocateBuffer(size_t batch_size, size_t session_len)
     h_medusa_verified_length_ =
         (int*)allocator_->reMalloc(h_medusa_verified_length_, sizeof(int) * batchxbeam, true, true);
 
+    medusa_context_length_begin_ =
+        (int*)allocator_->reMalloc(medusa_context_length_begin_, sizeof(int) * batchxbeam, true);
+
     is_allocate_buffer_ = true;
 }
 
@@ -999,6 +1002,7 @@ void LlamaBatch<T>::FreeBuffer()
         allocator_->free((void**)&d_medusa_mask_);
         allocator_->free((void**)&d_enable_medusa_);
 
+        allocator_->free((void**)&medusa_context_length_begin_);
         allocator_->free((void**)&medusa_verified_hidden_states_buf_);
 
         is_allocate_buffer_ = false;
@@ -1378,7 +1382,20 @@ auto LlamaBatch<T>::Finish(GenerationState& g) -> std::vector<Signal>
         }
         sync_check_cuda_error();
     }
-
+    // fixme: medusa_verified_packed_path_ should include not inited ..
+    invokeCompactKVCache<T>(block_ptrs_,
+                            medusa_context_length_begin_,  // is input length: [last verfied + last generate]
+                            medusa_verified_packed_path_,
+                            medusa_verified_length_,
+                            cu_block_counts_,
+                            40,
+                            40,
+                            64,
+                            128,
+                            medusa_input_length_,
+                            medusa_num_heads_,
+                            batch_size,
+                            stream_);
     Copy(state_->output_ids, batch_size * session_len_, h_output_ids_);
     Copy(h_medusa_cache_len_, batch_size, state_->h_context_length);
 
@@ -1830,6 +1847,7 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
         Copy(medusa_ti_ptr, medusa_input_len, d_medusa_ti_);
         Copy(medusa_mask_ptr, medusa_input_len * medusa_input_len, d_medusa_mask_);
         Copy(enable_medusa_ptr, mini_batch_size, d_enable_medusa_);
+        Copy(state_->h_context_length + first, mini_batch_size, medusa_context_length_begin_ + first);
         check_cuda_error(cudaStreamSynchronize(stream_));
 
         model_->forwardUnified(decoder_output_buf_ + first * model_->hidden_units_,  // out
@@ -1878,8 +1896,9 @@ bool LlamaBatch<T>::Forward(GenerationState& g, int iter)
                 state_->sequences[i]->cache_len += state_->sequences[i]->input_length;
             }
             else {
-                state_->sequences[i]->cache_len += 1 + h_medusa_max_match_length_buf_[i];  // input_len
-            }
+                state_->sequences[i]->cache_len += 1 + h_medusa_verified_length_[i];  // input_len
+            }  // fixme:h_medusa_verified_length_ is [b]
+               //  h_medusa_max_match_length_buf_ is [inited]
 
             h_medusa_cache_len_[i]        = state_->sequences[i]->cache_len;
             h_medusa_sequences_length_[i] = state_->sequences[i]->cache_len + 1;

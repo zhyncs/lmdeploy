@@ -732,4 +732,121 @@ void invokeMedusaBatchMatch(const int*   input_ids,
         input_ids, output_ids, each_path_length, max_match_length, max_match_idx, path_num, medusa_head_num);
 }
 
+template<typename T>
+__global__ void compactCache(uintptr_t* cache_block_ptrs,
+                             const int* sequence_length,
+                             const int* medusa_verified_packed_idx,
+                             const int* medusa_verified_length,
+                             const int* cu_block_counts,
+                             const int  kv_layer_num,
+                             const int  kv_head_num,
+                             const int  kv_cache_block_len,
+                             const int  kv_head_dim,
+                             const int  medusa_input_len,
+                             const int  medusa_head_num,
+                             const bool is_V)
+{
+
+    const int thread_idx  = threadIdx.x;
+    const int batch_idx   = blockIdx.y / kv_layer_num;
+    const int layer_idx   = blockIdx.y % kv_layer_num;
+    const int kv_head_idx = blockIdx.z;
+
+    const int match_count = medusa_verified_length[batch_idx];
+    if (match_count == 0) {
+        return;
+    }
+
+    uintptr_t* now_batch_block_ptrs     = cache_block_ptrs + cu_block_counts[batch_idx];
+    int        layer_offset             = layer_idx * kv_head_num * kv_cache_block_len * 2 * kv_head_dim;
+    int        head_offset              = kv_head_idx * kv_cache_block_len * kv_head_dim * 2;
+    const int  first_generate_token_idx = sequence_length[batch_idx] - medusa_input_len;
+    int        V_offset                 = is_V ? kv_cache_block_len * kv_head_dim : 0;
+
+    for (int packed_i = 1; packed_i <= match_count; packed_i++) {
+        int dst_packed_idx = *(medusa_verified_packed_idx + batch_idx * (1 + medusa_head_num) + packed_i);
+        int dst_token_idx  = first_generate_token_idx + packed_i;        // dst
+        int src_token_idx  = first_generate_token_idx + dst_packed_idx;  // src
+
+        int dst_kv_block_idx       = dst_token_idx / kv_cache_block_len;
+        int dst_token_kv_block_idx = dst_token_idx % kv_cache_block_len;
+        int src_kv_block_idx       = src_token_idx / kv_cache_block_len;
+        int src_token_kv_block_idx = src_token_idx % kv_cache_block_len;
+
+        T* dst_block_ptr_start = (T*)(*(now_batch_block_ptrs + dst_kv_block_idx));
+        T* src_block_ptr_start = (T*)(*(now_batch_block_ptrs + src_kv_block_idx));
+
+        int src_token_offset = src_token_kv_block_idx * kv_head_dim;
+        int dst_token_offset = dst_token_kv_block_idx * kv_head_dim;
+
+        dst_block_ptr_start[layer_offset + head_offset + dst_token_offset + thread_idx + V_offset] =
+            src_block_ptr_start[layer_offset + head_offset + src_token_offset + thread_idx + V_offset];
+    }
+}
+
+template<typename T>
+void invokeCompactKVCache(uintptr_t*   block_ptrs,
+                          const int*   sequence_length,
+                          const int*   medusa_verified_packed_idx,
+                          const int*   medusa_verified_length,
+                          const int*   cu_block_counts,
+                          const int    kv_layer_num,
+                          const int    kv_head_num,
+                          const int    kv_cache_block_len,
+                          const int    kv_head_dim,
+                          const int    medusa_input_len,
+                          const int    medusa_head_num,
+                          const int    batch_size,
+                          cudaStream_t stream)
+{
+    constexpr int block_size = 128;
+    dim3          grid(1, batch_size * kv_layer_num, kv_head_num);
+    // apply to K
+    compactCache<T><<<grid, block_size, 0, stream>>>(block_ptrs,
+                                                     sequence_length,
+                                                     medusa_verified_packed_idx,
+                                                     medusa_verified_length,
+                                                     cu_block_counts,
+                                                     kv_layer_num,
+                                                     kv_head_num,
+                                                     kv_cache_block_len,
+                                                     kv_head_dim,
+                                                     medusa_input_len,
+                                                     medusa_head_num,
+                                                     false);  // is_V = false
+    // apply to V
+    compactCache<T><<<grid, block_size, 0, stream>>>(block_ptrs,
+                                                     sequence_length,
+                                                     medusa_verified_packed_idx,
+                                                     medusa_verified_length,
+                                                     cu_block_counts,
+                                                     kv_layer_num,
+                                                     kv_head_num,
+                                                     kv_cache_block_len,
+                                                     kv_head_dim,
+                                                     medusa_input_len,
+                                                     medusa_head_num,
+                                                     true);  // is_V = true
+}
+#define INSTANTIATE_INVOKE_COMPACT_KV_CACHE(T)                                                                         \
+    template void invokeCompactKVCache<T>(uintptr_t * block_ptrs,                                                      \
+                                          const int*   sequence_length,                                                \
+                                          const int*   medusa_verified_packed_idx,                                     \
+                                          const int*   medusa_verified_length,                                         \
+                                          const int*   cu_block_counts,                                                \
+                                          const int    kv_layer_num,                                                   \
+                                          const int    kv_head_num,                                                    \
+                                          const int    kv_cache_block_len,                                             \
+                                          const int    kv_head_dim,                                                    \
+                                          const int    medusa_input_len,                                               \
+                                          const int    medusa_head_num,                                                \
+                                          const int    batch_size,                                                     \
+                                          cudaStream_t stream)
+INSTANTIATE_INVOKE_COMPACT_KV_CACHE(half);
+INSTANTIATE_INVOKE_COMPACT_KV_CACHE(float);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_COMPACT_KV_CACHE(__nv_bfloat16);
+#endif
+#undef INSTANTIATE_INVOKE_COMPACT_KV_CACHE
+
 }  // namespace turbomind
